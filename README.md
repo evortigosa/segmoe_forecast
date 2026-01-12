@@ -61,7 +61,9 @@ Time-MoE (https://github.com/Time-MoE/Time-MoE)
 
 PatchTST (https://github.com/yuqinie98/PatchTST)
 
-U-ViT (https://github.com/baofff/U-ViT)
+GShard (https://github.com/lucidrains/mixture-of-experts)
+
+Switch Transformers (https://github.com/tensorflow/mesh/tree/master/mesh_tensorflow/transformer)
 
 ## Contact
 Please let us know if you have any suggestions or find out a mistake: 

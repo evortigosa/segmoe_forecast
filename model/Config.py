@@ -65,7 +65,7 @@ class BaseConfig:
     ffn_type:str= 'mlp'
     glu:bool= False
     n_experts:int= 8
-    top_k_experts:int= 2
+    top_k_experts:int= 1
     experts_type:str= 'mlp'
     output_head_type:str= 'mlp'
     fine_tune:bool= True
