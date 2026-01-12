@@ -5,7 +5,7 @@
 
 import torch
 import torch.nn as nn
-from .TransformerModel import FeedForward, ConvFeedForward, DwConvFeedForward
+from .MoE import FeedForward, ConvFeedForward, DwConvFeedForward
 
 
 
@@ -248,8 +248,8 @@ class LinearUnPatch(nn.Module):
 
 class DecoderHead(nn.Module):
     """
-    Define the final projection head for Decoder-only models. (receives feature_maps
-    to UnPatch, output shape -> [batch_size, channels/features, seq_length])
+    Define the final projection head for Decoder-only (generative) models. (receives feature_maps
+    to UnPatch, output shape -> [batch_size, channels/features, seq_length]).
     """
 
     def __init__(self, patch_width, n_patches, channels, d_model, d_ff, n_outputs, dropout=0.2,
@@ -258,9 +258,9 @@ class DecoderHead(nn.Module):
         # decoder projection head
         self.d_head= OutputBlock(True, d_model, d_ff, d_model, dropout, head_type, bias, fine_tune)
         if unpatch == 'linear':
-            self.unpatch= LinearUnPatch(n_patches, channels, d_model, n_outputs, True, dropout, bias)
+            self.unpatch= LinearUnPatch(n_patches, channels, d_model, n_outputs, dropout, bias)
         else:
-            self.unpatch= UnPatch(patch_width, channels, d_model, True, dropout, bias)
+            self.unpatch= UnPatch(patch_width, channels, d_model, dropout, bias)
 
 
     def forward(self, x):
@@ -273,24 +273,29 @@ class DecoderHead(nn.Module):
 class EncoderSSLHead(nn.Module):
     """
     Define the final head for Encoder-only models under SSL pre-training mode (receives
-    feature_maps to UnPatch, output shape -> [batch_size, channels/features, seq_length])
+    feature_maps to UnPatch, output shape -> [batch_size, channels/features, seq_length]
+    when mask_type is not 'mae'; otherwise, outputs feature_maps).
     """
 
     def __init__(self, patch_width, n_patches, channels, d_model, d_ff, n_outputs, dropout=0.2,
                  head_type='mlp', bias=False, fine_tune=False, unpatch='conv') -> None:
         super(EncoderSSLHead, self).__init__()
         # encoder under SSL pre-training mode
-        self.e_head= OutputBlock(True, d_model, d_ff, d_model, dropout, head_type, bias, fine_tune)
         if unpatch == 'linear':
-            self.unpatch= LinearUnPatch(n_patches, channels, d_model, n_outputs, False, dropout, bias)
+            unpatch= LinearUnPatch(n_patches, channels, d_model, n_outputs, dropout, bias)
         else:
-            self.unpatch= UnPatch(patch_width, channels, d_model, False, dropout, bias)
+            unpatch= UnPatch(patch_width, channels, d_model, dropout, bias)
+
+        self.e_head= nn.Sequential(
+            OutputBlock(True, d_model, d_ff, d_model, dropout, head_type, bias, fine_tune),
+            unpatch,
+        )
 
 
     def forward(self, x):
         x= self.e_head(x)
 
-        return self.unpatch(x)
+        return x
 
 
 
@@ -312,9 +317,9 @@ class EncoderHead(nn.Module):
             # encoder forecasting head
             self.e_head= OutputBlock(True, d_model, d_ff, d_model, dropout, head_type, bias, fine_tune)
             if unpatch == 'linear':
-                self.unpatch= LinearUnPatch(n_patches, channels, d_model, n_outputs, True, dropout, bias)
+                self.unpatch= LinearUnPatch(n_patches, channels, d_model, n_outputs, dropout, bias)
             else:
-                self.unpatch= UnPatch(patch_width, channels, d_model, True, dropout, bias)
+                self.unpatch= UnPatch(patch_width, channels, d_model, dropout, bias)
         else:
             # encoder classification head
             self.e_head= OutputBlock(

@@ -42,6 +42,7 @@ class BaseConfig:
     - use_input_norm (bool): Default is True. Enables an "online" normalization from Non-stationary Transformer.
     - emb_norm_type (str): Default is 'layer'. This can be 'layer', 'rms'.
     - output_head_dropout (float): Default is 0.0 Dropout before unpatching head.
+    - exp_segment_size (int): Default is 1. Defines the segment size for MoE layers.
     """
     patch_width:int= 16
     channels:int= 1
@@ -74,6 +75,7 @@ class BaseConfig:
     use_input_norm:bool= True
     emb_norm_type:str|None= 'layer'
     output_head_dropout:float= 0.
+    exp_segment_size:int= 1
 
 
 @dataclass

@@ -44,7 +44,7 @@ class TSFTransformer(nn.Module):
         n_heads=8, n_kv_heads=4, d_ff=512, dropout=0.2, drop_path=0.3, norm_type='rms', flash_attn=True,
         diff_attn=False, ffn_type='mlp', glu=False, n_experts=8, top_k_experts=2, experts_type='mlp',
         output_head_type='mlp', fine_tune=True, unpatch='conv', bias=False, rope_theta=10000.0,
-        use_input_norm=True, emb_norm_type='layer', output_head_dropout=0.
+        use_input_norm=True, emb_norm_type='layer', output_head_dropout=0., exp_segment_size=1
     ) -> None:
         super(TSFTransformer, self).__init__()
         assert patch_width > 0, "patch_width must be greater than zero"
@@ -57,15 +57,15 @@ class TSFTransformer(nn.Module):
             f"block_size ({self.block_size}) must be greater than or equal to patch_width ({self.patch_width})"
         # standardize text-based hyperparameters
         norm_type= norm_type.lower()
-        emb_norm_type= emb_norm_type.lower()
         ffn_type= ffn_type.lower()
         experts_type= experts_type.lower()
         output_head_type= output_head_type.lower()
         unpatch= unpatch.lower()
+        emb_norm_type= emb_norm_type.lower() if isinstance(emb_norm_type, str) else emb_norm_type
 
-        self.n_outputs  = int(n_outputs)
         multi_modal= False
-        self.is_causal  = is_causal
+        self.n_outputs= int(n_outputs)
+        self.is_causal= is_causal
         # ensure mask_ratio is only available for Encoders
         mask_ratio= mask_ratio if not is_causal else 0.0
         # ensure forecasting mode for Encoders under no SSL objective
@@ -100,7 +100,7 @@ class TSFTransformer(nn.Module):
         self.backbone= TransformerModel(
             multi_modal, is_causal, n_layer, d_model, patch_dim, n_heads, n_kv_heads, d_ff, dropout,
             drop_path, norm_type, flash_attn, diff_attn, ffn_type, glu, n_experts, top_k_experts,
-            experts_type, bias, rope_theta
+            experts_type, bias, rope_theta, exp_segment_size
         )
 
         # identity transformation (no change to the tensor)
@@ -112,8 +112,7 @@ class TSFTransformer(nn.Module):
                 output_head_type, bias, fine_tune, unpatch
             )
         else:
-            is_ssl_mode= True if self.mask_layer is not None else False
-            if is_ssl_mode:
+            if self.mask_layer is not None:
                 self.head= EncoderSSLHead(
                     self.patch_width, patch_dim, channels, d_model, d_ff, self.block_size, output_head_dropout,
                     output_head_type, bias, fine_tune, unpatch

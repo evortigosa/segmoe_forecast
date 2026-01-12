@@ -8,7 +8,169 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops.layers.torch import Rearrange
-from .TransformerModel import FeedForward, ConvFeedForward, DwConvFeedForward
+
+
+
+"""
+Feed Forward Network
+"""
+
+
+class FeedForward(nn.Module):
+    """
+    The Feed Forward Network (FFN) with (optional) Gated Linear Unit (GLU) architecture.
+    The use of a gated mechanism enhances the expressivity of the FFN by introducing a gating.
+    This is more flexible than traditional MLP layers and is proven effective in many Transformer
+    variants like Llama 3, GPT-NeoX, or PaLM.
+    - This module can switch between a GLU-based FFN and a standard FFN based on the glu flag.
+    """
+
+    def __init__(self, d_model, d_ff, n_outputs=None, dropout=0.2, glu=False, bias=False) -> None:
+        super(FeedForward, self).__init__()
+        # First linear projection (always used)
+        self.up_proj= nn.Linear(d_model, d_ff, bias=bias)
+        # Gated Linear Unit (GLU) activation when glu=True
+        if glu:
+            self.gate_proj= nn.Linear(d_model, d_ff, bias=bias)
+            self.actv_fn= nn.SiLU()
+        else:
+            # Alternative: no gating
+            self.gate_proj= None
+            self.actv_fn= nn.GELU()
+        # Dropout layer (applied after gating or activation)
+        self.dropout= nn.Dropout(p=dropout) if dropout > 0.0 else None
+        # Final down projection
+        ffn_out= d_model if n_outputs is None else n_outputs
+        self.down_proj= nn.Linear(d_ff, ffn_out, bias=bias)
+
+        # initialize Linear modules with Glorot / fan_avg
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None: nn.init.zeros_(m.bias)
+
+
+    def forward(self, x):
+        # apply GLU activation when glu=True
+        if self.gate_proj is not None:
+            # elementwise multiply the gate and the features
+            x= self.actv_fn(self.up_proj(x)) * self.gate_proj(x)
+        else:
+            x= self.actv_fn(self.up_proj(x))
+        if self.dropout is not None:
+            x= self.dropout(x)
+        x= self.down_proj(x)
+
+        return x
+
+
+
+class ConvFeedForward(nn.Module):
+    """
+    Feed Forward Network (FFN) based on convolutions, with optional SwiGLU‐style gating.
+    This module first applies a regular (up-)convolution. If GLU is enabled, an additional conv
+    computes a gating mechanism, and the activation is applied only on the up‐conv branch before
+    performing an element-wise multiplication with the expanded gating features.
+    See https://arxiv.org/abs/1612.08083 and https://arxiv.org/abs/2104.00298
+    - This module can switch between a SwiGLU ConvFFN and a ConvFFN based on the glu flag.
+    """
+
+    def __init__(self, d_model, d_ff, n_outputs=None, dropout=0.2, glu=False, bias=False) -> None:
+        super(ConvFeedForward, self).__init__()
+        # First projection (always used)
+        self.up_conv= nn.Conv1d(d_model, d_ff, kernel_size=1, stride=1, padding=0, bias=bias)
+        # Gated Linear Unit (GLU) activation when glu=True
+        if glu:
+            self.gate_conv= nn.Conv1d(d_model, d_ff, kernel_size=1, stride=1, padding=0, bias=bias)
+            self.actv_fn= nn.SiLU()
+        else:
+            # Alternative: no gating
+            self.gate_conv= None
+            self.actv_fn= nn.GELU()
+        # Dropout layer (applied after gating or activation)
+        self.dropout= nn.Dropout(p=dropout) if dropout > 0.0 else None
+        # Final down projection
+        ffn_out= d_model if n_outputs is None else n_outputs
+        self.down_conv= nn.Conv1d(d_ff, ffn_out, kernel_size=1, stride=1, padding=0, bias=bias)
+
+        # initialize Conv modules with Glorot / fan_avg
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None: nn.init.zeros_(m.bias)
+
+
+    def forward(self, x):
+        x= x.permute(0, 2, 1)  # (B, T, C) -> (B, C, T)
+        # apply GLU activation when glu=True
+        if self.gate_conv is not None:
+            # elementwise multiply the gate and the features
+            x= self.actv_fn(self.up_conv(x)) * self.gate_conv(x)
+        else:
+            x= self.actv_fn(self.up_conv(x))
+        if self.dropout is not None:
+            x= self.dropout(x)
+        x= self.down_conv(x)
+
+        return x.permute(0, 2, 1)  # (B, C, T) -> (B, T, C)
+
+
+
+class DwConvFeedForward(nn.Module):
+    """
+    Feed Forward Network (FFN) based on depthwise separable convolutions, with optional SwiGLU gating.
+    This module first applies a depthwise convolution followed by a pointwise convolution to expand
+    the feature dimension (up‐conv). If GLU is enabled, an additional pointwise conv computes a
+    gating mechanism, and the SiLU activation is applied only on the pw_conv branch before performing
+    an element-wise multiplication with the gating features.
+    - This module can switch between a GLU-based DwConvFFN and a DwConvFFN based on the glu flag.
+    """
+
+    def __init__(self, d_model, d_ff, n_outputs=None, dropout=0.2, glu=False, bias=False) -> None:
+        super(DwConvFeedForward, self).__init__()
+        # Up-Conv -- Shared depthwise separable convolution (applied along the time dimension)
+        self.dw_conv= nn.Conv1d(
+            d_model, d_model, kernel_size=3, stride=1, padding=1, groups=d_model, bias=bias
+        )
+        # Up-Conv -- Pointwise convolution (expansion)
+        self.pw_conv= nn.Conv1d(d_model, d_ff, kernel_size=1, stride=1, padding=0, bias=bias)
+        # Gated Linear Unit (GLU) activation when glu=True
+        if glu:
+            # Additional pointwise convolution to compute the gate
+            self.gate_conv= nn.Conv1d(d_model, d_ff, kernel_size=1, stride=1, padding=0, bias=bias)
+            self.actv_fn= nn.SiLU()
+        else:
+            # Alternative: no gating
+            self.gate_conv= None
+            self.actv_fn= nn.GELU()
+        # Dropout layer (applied after gating or activation)
+        self.dropout= nn.Dropout(p=dropout) if dropout > 0.0 else None
+        # Final down projection
+        ffn_out= d_model if n_outputs is None else n_outputs
+        self.down_conv= nn.Conv1d(d_ff, ffn_out, kernel_size=1, stride=1, padding=0, bias=bias)
+
+        # initialize Conv modules with Glorot / fan_avg
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None: nn.init.zeros_(m.bias)
+
+
+    def forward(self, x):
+        x= x.permute(0, 2, 1)  # (B, T, C) -> (B, C, T)
+        # gate only the expansion step, otherwise the gate is forced to learn a direct mapping
+        x= self.dw_conv(x)
+        # apply GLU activation when glu=True
+        if self.gate_conv is not None:
+            # elementwise multiply the gate and the features
+            x= self.actv_fn(self.pw_conv(x)) * self.gate_conv(x)
+        else:
+            x= self.actv_fn(self.pw_conv(x))
+        if self.dropout is not None:
+            x= self.dropout(x)
+        x= self.down_conv(x)
+
+        return x.permute(0, 2, 1)  # (B, C, T) -> (B, T, C)
 
 
 
@@ -54,7 +216,7 @@ class MoEFeedForward(nn.Module):
 
         # shared fallback expert -- ensures no token is unprocessed if its top-k experts happen
         # to be poorly trained or overflowed
-        self.shared_expert= self.get_ffn(ffn_type, d_model, d_ff, dropout, fan_gate, glu, bias)
+        self.shared_expert= get_ffn(ffn_type, d_model, d_ff, dropout, fan_gate, glu, bias)
 
         if n_experts == 0:
             self.experts= None
@@ -76,7 +238,7 @@ class MoEFeedForward(nn.Module):
 
             # n_experts routed expert modules
             self.experts= nn.ModuleList([
-                self.get_expert_ffn(experts_type[i], d_model, d_ff, dropout, fan_gate, glu, bias)
+                get_expert_ffn(experts_type[i], d_model, d_ff, dropout, fan_gate, glu, bias)
                 for i in range(n_experts)
             ])
             # experts gating to generate token-to-expert affinity scores
