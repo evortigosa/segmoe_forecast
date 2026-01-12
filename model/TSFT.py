@@ -80,6 +80,7 @@ class TSFTransformer(nn.Module):
         self.forecast_fst= 0
         self.forecast_lst= 0
         # "online" normalization to help the model focus on residual dynamics
+        use_input_norm = use_input_norm and (emb_norm_type is not None)
         self.input_norm= InstanceNorm(dim2reduce=-1, eps=1e-5) if use_input_norm else None
 
         # define the patch embedding for converting TS tokens
@@ -130,7 +131,8 @@ class TSFTransformer(nn.Module):
             self.is_causal, self.forecasting, mask_ratio, n_layer, d_model, self.block_size,
             n_heads, n_kv_heads, d_ff, dropout, drop_path, norm_type, flash_attn, diff_attn,
             ffn_type, glu, n_experts, top_k_experts, experts_type, output_head_type, fine_tune,
-            unpatch, bias, rope_theta, use_input_norm, emb_norm_type, output_head_dropout
+            unpatch, bias, rope_theta, use_input_norm, emb_norm_type, output_head_dropout, 
+            exp_segment_size
         )
 
 
@@ -274,16 +276,16 @@ class TSFTransformer(nn.Module):
             ts= self.input_norm(ts, 'norm')
 
         x= self.t_embedding(ts)  # (B * C, P, d_model)
-        
-        # patch masking when in SSL mode
-        if self.mask_layer is not None:
-            x= self.mask_layer(x)
 
         # embed covariates (if any) to forward it into the cross-attention modules
         if ts_mark is not None:  # Disabled feature - WIP -
             x_cross= None
         else:
             x_cross= None
+
+        # patch masking when in SSL mode
+        if self.mask_layer is not None:
+            x= self.mask_layer(x)
 
         # forward the embeddings through the transformer
         x, router_logits= self.backbone(x, x_cross, start_pos, inference)
