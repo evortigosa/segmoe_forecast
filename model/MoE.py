@@ -307,7 +307,7 @@ class MoESegmentV0(nn.Module):
     """
 
     def __init__(self, d_model, d_ff, dropout=0.2, ffn_type='mlp', fan_gate=False, glu=False,
-                 n_experts=4, top_k=1, experts_type='mlp', exp_segment_size=1, bias=False) -> None:
+                 n_experts=4, top_k=1, experts_type='mlp', bias=False, exp_segment_size=1) -> None:
         super(MoESegmentV0, self).__init__()
         assert n_experts >= 0, "n_experts must be non-negative"
         top_k= top_k if n_experts > 0 else 0
@@ -460,7 +460,7 @@ class MoESegment(nn.Module):
     """
 
     def __init__(self, d_model, d_ff, dropout=0.2, ffn_type='mlp', fan_gate=False, glu=False,
-                 n_experts=4, top_k=1, experts_type='mlp', exp_segment_size=1, bias=False) -> None:
+                 n_experts=4, top_k=1, experts_type='mlp', bias=False, exp_segment_size=1) -> None:
         super(MoESegment, self).__init__()
         assert n_experts >= 0, "n_experts must be non-negative"
         top_k= top_k if n_experts > 0 else 0

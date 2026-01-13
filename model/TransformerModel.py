@@ -508,7 +508,7 @@ class TransformerBlock(nn.Module):
         if int(exp_segment_size) > 1:
             self.moeff= MoESegment(
                 d_model, d_ff, dropout, ffn_type, False, glu, n_experts, top_k_experts, experts_type,
-                exp_segment_size, bias
+                bias, exp_segment_size
             )
         else:
             self.moeff= MoEFeedForward(
@@ -583,11 +583,13 @@ class TransformerModel(nn.Module):
 
         if isinstance(exp_segment_size, int):
             exp_segment_size= [exp_segment_size for _ in range(n_layer)]
-        else:
+        elif isinstance(exp_segment_size, list):
             assert all(isinstance(item, int) for item in exp_segment_size), \
                 "exp_segment_size must be a list of integers"
             assert len(exp_segment_size) >= n_layer, \
                 "exp_segment_size must be a int or a list of length n_layer"
+        else:
+            raise ValueError("exp_segment_size must be an int or a list of integers")
 
         # define a stack of TransformerBlocks
         self.transformer= nn.ModuleList([
