@@ -1,6 +1,6 @@
 # Seg-MoE (Segment-wise Mixture-of-Experts)
 
-This repo is the official implementation for the paper: [Seg-MoE: Multi-Resolution Segment-wise Mixture-of-Experts for Time Series Forecasting Transformers](https://arxiv.org/abs/0000.00000).
+This repo is the official implementation for the paper: [Seg-MoE: Multi-Resolution Segment-wise Mixture-of-Experts for Time Series Forecasting Transformers](https://arxiv.org/abs/2601.21641).
 
 ## Introduction
 We introduce Seg-MoE, a sparse MoE design that routes and processes contiguous time-step segments rather than making independent expert decisions. Token segments allow each expert to model intra-segment interactions directly, naturally aligning with inherent temporal patterns. We integrate Seg-MoE layers into a time-series Transformer and evaluate it on multiple multivariate long-term forecasting benchmarks. Seg-MoE consistently achieves state-of-the-art forecasting accuracy across almost all prediction horizons, outperforming both dense Transformers and prior token-wise MoE models.
@@ -42,20 +42,16 @@ We evaluate Seg-MoE on long-term multivariate forecasting benchmarks. Comprehens
 If you find this repo helpful, please cite our paper.
 
 ```
-@article{xxxx,
-  title={Seg-MoE: Multi-Resolution Segment-wise Mixture-of-Experts for Time Series Forecasting Transformers},
-  author={Evandro S. Ortigossa, ..., Eran Segal},
-  journal={xxxx},
-  year={xxxx}
+@article{ortigossa2026seg,
+  title={{Seg-MoE}: Multi-Resolution Segment-wise Mixture-of-Experts for Time Series Forecasting Transformers},
+  author={Ortigossa, Evandro S. and Segal, Eran},
+  journal={arXiv preprint arXiv:2601.21641},
+  year={2026}
 }
 ```
 
 ## Acknowledgement
 We appreciate the following GitHub repos for their valuable efforts:
-
-Stationary (https://github.com/thuml/Nonstationary_Transformers)
-
-TimeXer (https://github.com/thuml/TimeXer)
 
 Time-MoE (https://github.com/Time-MoE/Time-MoE)
 
@@ -64,6 +60,10 @@ PatchTST (https://github.com/yuqinie98/PatchTST)
 GShard (https://github.com/lucidrains/mixture-of-experts)
 
 Switch Transformers (https://github.com/tensorflow/mesh/tree/master/mesh_tensorflow/transformer)
+
+Stationary (https://github.com/thuml/Nonstationary_Transformers)
+
+TimeXer (https://github.com/thuml/TimeXer)
 
 ## Contact
 Please let us know if you have any suggestions or find out a mistake: 
