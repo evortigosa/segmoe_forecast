@@ -5,7 +5,7 @@ Get DataLoader objects for ETT and other datasets.
 """
 
 from torch.utils.data import DataLoader
-from .DataLoaders import Dataset_ETT, Dataset_Custom, Dataset_GlobalTemp
+from .DataLoaders import Dataset_ETT, Dataset_Custom
 
 
 
@@ -14,7 +14,7 @@ ETT DataLoaders
 """
 
 
-def get_ett_data_loaders(ett_root_path, from_csv, dataset_name_1, dataset_name_2, btc_size,
+def get_ett_data_loaders(ett_root_path, dataset_name_1, dataset_name_2, from_csv, btc_size,
                          time_covariates, patch_width, block_size, out_width):
     """
     Create DataLoader objects for ETTx1, ETTx2, and combined datasets for encoder/decoder training
@@ -22,6 +22,7 @@ def get_ett_data_loaders(ett_root_path, from_csv, dataset_name_1, dataset_name_2
     Args:
     - ett_root_path (str): Directory path for dataset files.
     - dataset_name_1, dataset_name_2 (str): Filenames (e.g., 'ETTh1.csv', 'ETTh2.csv').
+    - from_csv (bool): Whether to read data from CSV files or neuralforecast's LongHorizon.
     - btc_size (int): Batch size.
     - time_covariates (bool): Use time features.
     - patch_width (int): Length of each patch.
