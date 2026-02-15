@@ -1,0 +1,106 @@
+# -*- coding: utf-8 -*-
+"""
+Time-Series Forecasting Transformer (TSFT) with Segment-wise Mixture-of-Experts (Seg-MoE)
+Model Configuration
+"""
+
+from dataclasses import dataclass
+
+
+
+@dataclass
+class BaseConfig:
+    """
+    - patch_width (int): Default is 16. Defines the patch length.
+    - channels (int): Default is 1. Defines the number of channels (features/time series).
+    - n_outputs (int): Default is 96. Defines the forecasting horizon.
+    - width_factor (float): Default is 1.5. Defines the output horizon as multiple of patch_width.
+    - is_causal (bool): Default is False. Encoder Transformer (False) or Decoder Transformer (True)
+    - forecasting (bool): Default is True. Defines the model as a forecaster.
+    - mask_ratio (float): Default is 0. Enables representation learning.
+    - n_layer (int): Default is 6. Defines the number of transformer layers/blocks.
+    - d_model (int): Default is 256. Defines the model dimension.
+    - block_size (int): Default is 512. Defines the max size of the look-back window.
+    - n_heads (int): Default is 8. Defines the number of query heads.
+    - n_kv_heads (int): Default is 4. Defines the number of key/value heads.
+    - d_ff (int): Default is 512. Defines the hidden dimensionality for experts/FFN.
+    - dropout (float): Default is 0.2. Defines the dropout rate.
+    - drop_path (float): Default is 0.3. Defines the DropPath rate.
+    - norm_type (str): Default is 'rms'. This can be 'layer', 'rms', 'dyt' (experimental).
+    - flash_attn (bool): Default is True. Enables FlashAttention.
+    - diff_attn (bool): Default is False. Enables Differential Attention (experimental).
+    - ffn_type (str): Default is 'mlp'. This can be 'mlp', 'conv', 'dwconv'.
+    - glu (bool): Default is False. Enables the Gated Linear Unit (GLU) architecture for experts.
+    - n_experts (int): Default is 4. Defines the number of MoHE experts.
+    - top_k_experts (int): Default is 1. Defines the number of MoHE activated experts.
+    - experts_type (str): Default is 'mlp'. This can be 'mlp'.
+    - output_head_type (str): Default is 'mlp'. This can be 'mlp', 'conv', 'dwconv'.
+    - fine_tune (bool): Default is True. When False, enables an extra layer before unpatching.
+    - unpatch (str): Default is 'conv'. This can be 'mlp', 'conv'.
+    - bias (bool): Default is False. Enables bias for all learning modules.
+    - rope_theta (float): Default is 10000.0. RoPE base value
+    - use_input_norm (bool): Default is True. Enables an "online" normalization from Non-stationary Transformer.
+    - emb_norm_type (str|None): Default is 'layer'. This can be 'layer', 'rms'.
+    - output_head_dropout (float): Default is 0.0 Dropout before unpatching head.
+    - exp_segment_size (int|list): Default is 1. Defines the segment size for MoE layers.
+    """
+    patch_width:int= 16
+    channels:int= 1
+    n_outputs:int= 96
+    width_factor:float= 1.5
+    is_causal:bool= False          # Encoder Transformer (False) or Decoder Transformer (True)
+    forecasting:bool= True
+    mask_ratio:float= 0.           # enables representation learning
+    n_layer:int= 6
+    d_model:int= 256
+    block_size:int= 512
+    n_heads:int= 8
+    n_kv_heads:int= 4
+    d_ff:int= 512
+    dropout:float= 0.2
+    drop_path:float= 0.3
+    norm_type:str= 'rms'
+    flash_attn:bool= True
+    diff_attn:bool= False
+    ffn_type:str= 'mlp'
+    glu:bool= False
+    n_experts:int= 8
+    top_k_experts:int= 1
+    experts_type:str= 'mlp'
+    output_head_type:str= 'mlp'
+    fine_tune:bool= True
+    unpatch:str= 'conv'
+    bias:bool= False
+    rope_theta:float= 10000.0
+    use_input_norm:bool= True
+    emb_norm_type:str|None= 'layer'
+    output_head_dropout:float= 0.
+    exp_segment_size:int|list= 1
+
+
+@dataclass
+class TinyConfig(BaseConfig):
+    patch_width:int= 8
+    width_factor:float= 3
+    n_layer:int= 4
+    d_model:int= 64
+    n_heads:int= 4
+    n_kv_heads:int= 2
+    d_ff:int= 128
+    n_experts:int= 4
+    top_k_experts:int= 1
+    output_head_dropout:float= 0.
+
+
+@dataclass
+class SmallConfig(BaseConfig):
+    patch_width:int= 8
+    width_factor:float= 3
+    n_layer:int= 4
+    d_model:int= 128
+    n_heads:int= 4
+    n_kv_heads:int= 2
+    d_ff:int= 256
+    n_experts:int= 4
+    top_k_experts:int= 1
+    output_head_dropout:float= 0.
