@@ -31,6 +31,15 @@ def get_ett_data_loaders(ett_root_path, dataset_name_1, dataset_name_2, from_csv
     Returns:
     - Tuple of DataLoader and scaler objects for decoder, encoder, and test sets.
     """
+    # --- safety checks ---
+    if patch_width <= 0 or block_size <= 0:
+        raise ValueError("patch_width and block_size must be positive.")
+    if patch_width > block_size:
+        raise ValueError(f"patch_width ({patch_width}) cannot exceed block_size ({block_size}).")
+    if out_width <= 0.0:
+        raise ValueError("out_width must be a positive number.")
+    if int(patch_width * out_width) > block_size:
+        raise ValueError("patch_width * out_width cannot exceed block_size (would make label_len negative).")
 
     """ ----- setup for getting training and val data ----- """
     INPUT_WIDTH = block_size          # how many past steps you feed into the model
@@ -161,6 +170,15 @@ def get_custom_data_loaders(root_path, dataset_name, from_csv, btc_size, time_co
     Returns:
     - Tuple of DataLoader and scaler objects for decoder, encoder, and test sets.
     """
+    # --- safety checks ---
+    if patch_width <= 0 or block_size <= 0:
+        raise ValueError("patch_width and block_size must be positive.")
+    if patch_width > block_size:
+        raise ValueError(f"patch_width ({patch_width}) cannot exceed block_size ({block_size}).")
+    if out_width <= 0.0:
+        raise ValueError("out_width must be a positive number.")
+    if int(patch_width * out_width) > block_size:
+        raise ValueError("patch_width * out_width cannot exceed block_size (would make label_len negative).")
 
     """ ----- setup for getting training and val data ----- """
     INPUT_WIDTH = block_size          # how many past steps you feed into the model
