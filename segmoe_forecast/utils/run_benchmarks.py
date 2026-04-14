@@ -90,7 +90,7 @@ def build_parser():
     parser.add_argument("--n-outputs",   type=int, default=96, help="Prediction horizon / number of outputs")
     parser.add_argument("--channels",    type=int, default=7, help="Number of input channels")
     parser.add_argument(
-        "--exp-segment-size", type=parse_value, default=1,
+        "--exp-segment-size", type=parse_value, default="[3,5,5,5]",
         help="Number of contiguous tokens handled by each Seg-MoE layer. Can be a single int or a list of ints"
     )
     parser.add_argument(
@@ -201,8 +201,7 @@ def setup_data_loaders(
             dataset_name_2= 'ETTh1'
 
         (
-            _, _, _, _, _, _,
-            enc_train_loader, enc_val_loader, _, _, enc_tds_scaler, _,
+            train_loader, val_loader, _, _, tds_scaler, _,
             test_loader_96, test_loader_192, test_loader_336, test_loader_720, _, _, _, _,
 
         )= get_ett_data_loaders(
@@ -211,8 +210,7 @@ def setup_data_loaders(
         )
     else:
         (
-            _, _, _,
-            enc_train_loader, enc_val_loader, enc_tds_scaler,
+            train_loader, val_loader, tds_scaler,
             test_loader_96, test_loader_192, test_loader_336, test_loader_720,
 
         )= get_custom_data_loaders(
@@ -221,7 +219,7 @@ def setup_data_loaders(
         )
 
     return (
-        enc_train_loader, enc_val_loader, enc_tds_scaler,
+        train_loader, val_loader, tds_scaler,
         test_loader_96, test_loader_192, test_loader_336, test_loader_720,
     )
 
