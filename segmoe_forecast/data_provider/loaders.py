@@ -4,8 +4,36 @@ Time-Series Forecasting Transformer (TSFT) with Segment-wise Mixture-of-Experts 
 Get DataLoader objects for ETT and other datasets.
 """
 
+import numpy as np
 from torch.utils.data import DataLoader
 from .DataLoaders import Dataset_ETT, Dataset_Custom
+
+
+
+def loaders_safety_checks(patch_width, block_size, out_width, test_horizons):
+    # --- safety checks ---
+    if patch_width <= 0 or block_size <= 0:
+        raise ValueError("patch_width and block_size must be positive.")
+    if patch_width > block_size:
+        raise ValueError(f"patch_width ({patch_width}) cannot exceed block_size ({block_size}).")
+    if out_width < 0.0:
+        raise ValueError("out_width must be a non-negative number.")
+    if int(patch_width * out_width) > block_size:
+        raise ValueError("patch_width * out_width cannot exceed block_size (would make label_len negative).")
+
+    if isinstance(test_horizons, (int, np.integer)):
+        test_horizons= [int(test_horizons)]
+    if test_horizons is None:
+        test_horizons= [96, 192, 336, 720]
+
+    for h in test_horizons:
+        if h is None:
+            raise ValueError("test_horizons cannot contain None; use [] or None for 'no test'.")
+        h_int= int(h)
+        if h_int <= 0:
+            raise ValueError(f"Invalid horizon {h}; all horizons must be positive integers.")
+
+    return test_horizons
 
 
 
@@ -15,7 +43,7 @@ ETT DataLoaders
 
 
 def get_ett_data_loaders(ett_root_path, dataset_name_1, dataset_name_2, from_csv, btc_size,
-                         time_covariates, patch_width, block_size, out_width):
+                         time_covariates, patch_width, block_size, out_width, test_horizons=None):
     """
     Create DataLoader objects for ETTx1, ETTx2, and combined datasets for encoder/decoder training
     and testing.
@@ -31,17 +59,10 @@ def get_ett_data_loaders(ett_root_path, dataset_name_1, dataset_name_2, from_csv
     Returns:
     - Tuple of DataLoader and scaler objects for decoder, encoder, and test sets.
     """
-    # --- safety checks ---
-    if patch_width <= 0 or block_size <= 0:
-        raise ValueError("patch_width and block_size must be positive.")
-    if patch_width > block_size:
-        raise ValueError(f"patch_width ({patch_width}) cannot exceed block_size ({block_size}).")
-    if out_width < 0.0:
-        raise ValueError("out_width must be a non-negative number.")
-    if int(patch_width * out_width) > block_size:
-        raise ValueError("patch_width * out_width cannot exceed block_size (would make label_len negative).")
+    test_horizons= loaders_safety_checks(patch_width, block_size, out_width, test_horizons)
 
     """ ----- setup for getting training and val data ----- """
+    # int(patch_width * out_width) == 0, generate train/val for SSL mode (data == target)
     INPUT_WIDTH = block_size          # how many past steps you feed into the model
     HISTORY_TAIL= block_size - int(patch_width * out_width)
     OUTPUT_WIDTH= int(patch_width * out_width)  # predict a sequence of time-patches
@@ -72,50 +93,33 @@ def get_ett_data_loaders(ett_root_path, dataset_name_1, dataset_name_2, from_csv
 
     """ ----- setup for test data ----- """
     # forecast horizons: {96, 192, 336, 720}
-    F_HISTORY_TAIL= 0
-    size_te_96= [INPUT_WIDTH, F_HISTORY_TAIL, 96]
+    test_loader_ett_1= {}
+    test_loader_ett_2= {}
 
-    test_ds_ett_1_96= Dataset_ETT(
-        root_path=ett_root_path, data_path=dataset_name_1, from_csv=from_csv, split='test', size=size_te_96,
-        features='MS', target='OT', scale=True, timeenc=1, use_time_features=time_covariates
-    )
-    test_ds_ett_2_96= Dataset_ETT(
-        root_path=ett_root_path, data_path=dataset_name_2, from_csv=from_csv, split='test', size=size_te_96,
-        features='MS', target='OT', scale=True, timeenc=1, use_time_features=time_covariates
-    )
+    for horizon in test_horizons:
+        if int(patch_width * out_width) > 0:
+            F_INPUT_WIDTH = INPUT_WIDTH
+            F_HISTORY_TAIL= 0
+            F_OUTPUT_WIDTH= horizon
+        else:  # int(patch_width * out_width) == 0, generate test for SSL mode (data == target)
+            F_INPUT_WIDTH = horizon
+            F_HISTORY_TAIL= horizon
+            F_OUTPUT_WIDTH= 0
 
-    size_te_192= [INPUT_WIDTH, F_HISTORY_TAIL, 192]
+        size_te= [F_INPUT_WIDTH, F_HISTORY_TAIL, F_OUTPUT_WIDTH]
 
-    test_ds_ett_1_192= Dataset_ETT(
-        root_path=ett_root_path, data_path=dataset_name_1, from_csv=from_csv, split='test', size=size_te_192,
-        features='MS', target='OT', scale=True, timeenc=1, use_time_features=time_covariates
-    )
-    test_ds_ett_2_192= Dataset_ETT(
-        root_path=ett_root_path, data_path=dataset_name_2, from_csv=from_csv, split='test', size=size_te_192,
-        features='MS', target='OT', scale=True, timeenc=1, use_time_features=time_covariates
-    )
+        test_ds_ett_1= Dataset_ETT(
+            root_path=ett_root_path, data_path=dataset_name_1, from_csv=from_csv, split='test', size=size_te,
+            features='MS', target='OT', scale=True, timeenc=1, use_time_features=time_covariates
+        )
+        test_loader_ett_1[horizon]= DataLoader(test_ds_ett_1,  batch_size=btc_size, shuffle=False)
 
-    size_te_336= [INPUT_WIDTH, F_HISTORY_TAIL, 336]
+        test_ds_ett_2= Dataset_ETT(
+            root_path=ett_root_path, data_path=dataset_name_2, from_csv=from_csv, split='test', size=size_te,
+            features='MS', target='OT', scale=True, timeenc=1, use_time_features=time_covariates
+        )
+        test_loader_ett_2[horizon]= DataLoader(test_ds_ett_2, batch_size=btc_size, shuffle=False)
 
-    test_ds_ett_1_336= Dataset_ETT(
-        root_path=ett_root_path, data_path=dataset_name_1, from_csv=from_csv, split='test', size=size_te_336,
-        features='MS', target='OT', scale=True, timeenc=1, use_time_features=time_covariates
-    )
-    test_ds_ett_2_336= Dataset_ETT(
-        root_path=ett_root_path, data_path=dataset_name_2, from_csv=from_csv, split='test', size=size_te_336,
-        features='MS', target='OT', scale=True, timeenc=1, use_time_features=time_covariates
-    )
-
-    size_te_720= [INPUT_WIDTH, F_HISTORY_TAIL, 720]
-
-    test_ds_ett_1_720= Dataset_ETT(
-        root_path=ett_root_path, data_path=dataset_name_1, from_csv=from_csv, split='test', size=size_te_720,
-        features='MS', target='OT', scale=True, timeenc=1, use_time_features=time_covariates
-    )
-    test_ds_ett_2_720= Dataset_ETT(
-        root_path=ett_root_path, data_path=dataset_name_2, from_csv=from_csv, split='test', size=size_te_720,
-        features='MS', target='OT', scale=True, timeenc=1, use_time_features=time_covariates
-    )
 
     """ ETTx1 DataLoaders """
     train_loader_ett_1= DataLoader(train_ds_ett_1, batch_size=btc_size, shuffle=True)
@@ -125,26 +129,13 @@ def get_ett_data_loaders(ett_root_path, dataset_name_1, dataset_name_2, from_csv
     train_loader_ett_2= DataLoader(train_ds_ett_2, batch_size=btc_size, shuffle=True)
     val_loader_ett_2  = DataLoader(val_ds_ett_2,   batch_size=btc_size, shuffle=False)
 
-    # forecast horizons: {96, 192, 336, 720}
-    test_loader_ett_1_96= DataLoader(test_ds_ett_1_96,  batch_size=btc_size, shuffle=False)
-    test_loader_ett_2_96= DataLoader(test_ds_ett_2_96, batch_size=btc_size, shuffle=False)
-
-    test_loader_ett_1_192= DataLoader(test_ds_ett_1_192,  batch_size=btc_size, shuffle=False)
-    test_loader_ett_2_192= DataLoader(test_ds_ett_2_192, batch_size=btc_size, shuffle=False)
-
-    test_loader_ett_1_336= DataLoader(test_ds_ett_1_336,  batch_size=btc_size, shuffle=False)
-    test_loader_ett_2_336= DataLoader(test_ds_ett_2_336, batch_size=btc_size, shuffle=False)
-
-    test_loader_ett_1_720= DataLoader(test_ds_ett_1_720,  batch_size=btc_size, shuffle=False)
-    test_loader_ett_2_720= DataLoader(test_ds_ett_2_720, batch_size=btc_size, shuffle=False)
-
     return (
         # Train / Val
         train_loader_ett_1, val_loader_ett_1, train_loader_ett_2, val_loader_ett_2,
         tds_scaler_1, tds_scaler_2,
         # Test
-        test_loader_ett_1_96, test_loader_ett_1_192, test_loader_ett_1_336, test_loader_ett_1_720,
-        test_loader_ett_2_96, test_loader_ett_2_192, test_loader_ett_2_336, test_loader_ett_2_720,
+        *[test_loader_ett_1[int(h)] for h in test_horizons],
+        *[test_loader_ett_2[int(h)] for h in test_horizons],
     )
 
 
@@ -155,7 +146,7 @@ Custom DataLoaders
 
 
 def get_custom_data_loaders(root_path, dataset_name, from_csv, btc_size, time_covariates, patch_width,
-                            block_size, out_width, freq='min'):
+                            block_size, out_width, freq='min', test_horizons=None):
     """
     Create DataLoader objects for encoder/decoder training and testing.
     Args:
@@ -170,17 +161,10 @@ def get_custom_data_loaders(root_path, dataset_name, from_csv, btc_size, time_co
     Returns:
     - Tuple of DataLoader and scaler objects for decoder, encoder, and test sets.
     """
-    # --- safety checks ---
-    if patch_width <= 0 or block_size <= 0:
-        raise ValueError("patch_width and block_size must be positive.")
-    if patch_width > block_size:
-        raise ValueError(f"patch_width ({patch_width}) cannot exceed block_size ({block_size}).")
-    if out_width < 0.0:
-        raise ValueError("out_width must be a non-negative number.")
-    if int(patch_width * out_width) > block_size:
-        raise ValueError("patch_width * out_width cannot exceed block_size (would make label_len negative).")
+    test_horizons= loaders_safety_checks(patch_width, block_size, out_width, test_horizons)
 
     """ ----- setup for getting training and val data ----- """
+    # int(patch_width * out_width) == 0, generate train/val for SSL mode (data == target)
     INPUT_WIDTH = block_size          # how many past steps you feed into the model
     HISTORY_TAIL= block_size - int(patch_width * out_width)
     OUTPUT_WIDTH= int(patch_width * out_width)  # predict a sequence of time-patches
@@ -200,48 +184,34 @@ def get_custom_data_loaders(root_path, dataset_name, from_csv, btc_size, time_co
 
     """ ----- setup for test data ----- """
     # forecast horizons: {96, 192, 336, 720}
-    F_HISTORY_TAIL= 0
-    size_te_96= [INPUT_WIDTH, F_HISTORY_TAIL, 96]
+    test_loader= {}
 
-    test_ds_96= Dataset_Custom(
-        root_path=root_path, data_path=dataset_name, from_csv=from_csv, split='test', size=size_te_96,
-        features='MS', target='OT', scale=True, timeenc=1, freq=freq, use_time_features=time_covariates
-    )
+    for horizon in test_horizons:
+        if int(patch_width * out_width) > 0:
+            F_INPUT_WIDTH = INPUT_WIDTH
+            F_HISTORY_TAIL= 0
+            F_OUTPUT_WIDTH= horizon
+        else:  # int(patch_width * out_width) == 0, generate test for SSL mode (data == target)
+            F_INPUT_WIDTH = horizon
+            F_HISTORY_TAIL= horizon
+            F_OUTPUT_WIDTH= 0
 
-    size_te_192= [INPUT_WIDTH, F_HISTORY_TAIL, 192]
+        size_te= [F_INPUT_WIDTH, F_HISTORY_TAIL, F_OUTPUT_WIDTH]
 
-    test_ds_192= Dataset_Custom(
-        root_path=root_path, data_path=dataset_name, from_csv=from_csv, split='test', size=size_te_192,
-        features='MS', target='OT', scale=True, timeenc=1, freq=freq, use_time_features=time_covariates
-    )
+        test_ds= Dataset_Custom(
+            root_path=root_path, data_path=dataset_name, from_csv=from_csv, split='test', size=size_te,
+            features='MS', target='OT', scale=True, timeenc=1, freq=freq, use_time_features=time_covariates
+        )
+        test_loader[horizon]= DataLoader(test_ds,  batch_size=btc_size, shuffle=False)
 
-    size_te_336= [INPUT_WIDTH, F_HISTORY_TAIL, 336]
-
-    test_ds_336= Dataset_Custom(
-        root_path=root_path, data_path=dataset_name, from_csv=from_csv, split='test', size=size_te_336,
-        features='MS', target='OT', scale=True, timeenc=1, freq=freq, use_time_features=time_covariates
-    )
-
-    size_te_720= [INPUT_WIDTH, F_HISTORY_TAIL, 720]
-
-    test_ds_720= Dataset_Custom(
-        root_path=root_path, data_path=dataset_name, from_csv=from_csv, split='test', size=size_te_720,
-        features='MS', target='OT', scale=True, timeenc=1, freq=freq, use_time_features=time_covariates
-    )
 
     """ DataLoaders """
     train_loader= DataLoader(train_ds, batch_size=btc_size, shuffle=True)
     val_loader  = DataLoader(val_ds,   batch_size=btc_size, shuffle=False)
 
-    # forecast horizons: {96, 192, 336, 720}
-    test_loader_96 = DataLoader(test_ds_96,  batch_size=btc_size, shuffle=False)
-    test_loader_192= DataLoader(test_ds_192, batch_size=btc_size, shuffle=False)
-    test_loader_336= DataLoader(test_ds_336, batch_size=btc_size, shuffle=False)
-    test_loader_720= DataLoader(test_ds_720, batch_size=btc_size, shuffle=False)
-
     return (
         # Train / Val
         train_loader, val_loader, tds_scaler,
         # Test
-        test_loader_96, test_loader_192, test_loader_336, test_loader_720,
+        *[test_loader[int(h)] for h in test_horizons],
     )
