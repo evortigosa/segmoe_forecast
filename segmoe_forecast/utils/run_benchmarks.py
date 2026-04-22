@@ -84,9 +84,9 @@ def build_parser():
                         help="Enable or disable text infos")
     # model
     parser.add_argument("--model-size",  type=parse_value, default='base', help="Type of model configuration")
-    parser.add_argument("--block-size",  type=int, default=672, help="Input sequence length / context window")
+    parser.add_argument("--block-size",  type=int, default=512, help="Input sequence length / context window")
     parser.add_argument("--patch-width", type=int, default=8, help="Patch width")
-    parser.add_argument("--width-factor",type=float, default=3, help="Output patch width")
+    parser.add_argument("--width-factor",type=float, default=4, help="Output patch width")
     parser.add_argument("--n-outputs",   type=int, default=96, help="Prediction horizon / number of outputs")
     parser.add_argument("--channels",    type=int, default=7, help="Number of input channels")
     parser.add_argument(
@@ -108,10 +108,10 @@ def build_parser():
     parser.add_argument("--checkpoint-dir", type=str, default='checkpoints', help="Path to the checkpoint repo")
     parser.add_argument("--checkpoint-file",type=str, default='tsft_checkpoint', help="File name of the checkpoint")
     parser.add_argument("--plot-file", type=str, default='tsft_training', help="File name for training plots")
-    parser.add_argument("--max-lr", type=float, default=3.2e-3, help="Max learning rate")
-    parser.add_argument("--min-lr", type=float, default=1.2e-4, help="Min learning rate")
+    parser.add_argument("--max-lr", type=float, default=3.2e-4, help="Max learning rate")
+    parser.add_argument("--min-lr", type=float, default=1.2e-5, help="Min learning rate")
     parser.add_argument("--warmup-portion",type=float, default=0.1, help="Percentage of steps as warmup")
-    parser.add_argument("--weight-decay",  type=float, default=1e-4, help="AdamW weight_decay")
+    parser.add_argument("--weight-decay",  type=float, default=1e-1, help="AdamW weight_decay")
     parser.add_argument("--setup-opt", action=argparse.BooleanOptionalAction, default=False,
                         help="Enable or disable model setup_optimizer on weight decayed parameters")
     parser.add_argument("--loss", type=str, default='huber', help="Loss criterion can be HuberLoss or MSELoss")
