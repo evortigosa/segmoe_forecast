@@ -3,6 +3,7 @@
 # The Time-Series Forecasting Transformer (TSFT) with Segment-wise Mixture-of-Experts (Seg-MoE)
 """
 
+import math
 import torch
 import torch.nn as nn
 from .Normalization import RMSNorm
@@ -12,6 +13,42 @@ from .Normalization import RMSNorm
 """
 # Input Modules
 """
+
+
+class PositionalEmbedding(nn.Module):
+    """
+    Implements the standard PE function as in https://arxiv.org/abs/1706.03762.
+    """
+
+    def __init__(self, block_size, d_model, base_val=10000.0) -> None:
+        super(PositionalEmbedding, self).__init__()
+        self.block_size= block_size
+        self.base_val= base_val
+
+        # create a long tensor of block_size positions
+        position= torch.arange(0, block_size).unsqueeze(1)
+        frequencies= torch.exp(
+            torch.arange(0, d_model, 2).float() * -(math.log(base_val) / d_model)
+        )
+        # create an empty placeholder
+        wpe= torch.zeros(block_size, d_model).float()
+        wpe.require_grad= False
+        # iterating over each element in the sequence using sin and cos
+        wpe[:, 0::2]= torch.sin(position * frequencies)
+        wpe[:, 1::2]= torch.cos(position * frequencies)
+        # register_buffer -- it is not saved in the state_dict nor optimized
+        self.register_buffer('wpe', wpe.unsqueeze(0), persistent=False)
+
+
+    def extra_repr(self):
+        return f"block_size={self.block_size}, base={self.base_val}"
+
+
+    def forward(self, x):
+        x= x + self.wpe[:, : x.size(1)].to(x.device)
+
+        return x
+
 
 
 class PatchMasking(nn.Module):

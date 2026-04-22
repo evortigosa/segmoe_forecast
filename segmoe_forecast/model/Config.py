@@ -42,6 +42,9 @@ class BaseConfig:
     - use_input_norm (bool): Default is True. Enables an "online" normalization from Non-stationary Transformer.
     - emb_norm_type (str|None): Default is 'layer'. This can be 'layer', 'rms'.
     - output_head_dropout (float): Default is 0.0 Dropout before unpatching head.
+    - use_qk_norm (bool): Default is False. Enables the QK functional RMSNorm after RoPE.
+    - headwise_attn_gate (bool): Default is False. Enables headwise attention gate.
+    - c_att_mode (str): Default is 'full'. Cross Attn (multi_modal) across the model. Can be 'full' or 'first'.
     - exp_segment_size (int|list): Default is 1. Defines the segment size for MoE layers.
     """
     patch_width:int= 16
@@ -59,22 +62,25 @@ class BaseConfig:
     d_ff:int= 512
     dropout:float= 0.2
     drop_path:float= 0.3
-    norm_type:str= 'rms'
-    flash_attn:bool= True
-    diff_attn:bool= False
+    norm_type:str= 'rms'           # layer, rms
+    flash_attn:bool= True          # enables FlashAttention
+    diff_attn:bool= False          # enables Differential Attention (WIP)
     ffn_type:str= 'mlp'
-    glu:bool= False
+    glu:bool= False                # enables the Gated Linear Unit (GLU) architecture for experts
     n_experts:int= 8
     top_k_experts:int= 1
     experts_type:str= 'mlp'
     output_head_type:str= 'mlp'
-    fine_tune:bool= True
-    unpatch:str= 'conv'
-    bias:bool= False
-    rope_theta:float= 10000.0
-    use_input_norm:bool= True
-    emb_norm_type:str|None= 'layer'
-    output_head_dropout:float= 0.
+    fine_tune:bool= True           # enables an extra layer before unpatching
+    unpatch:str= 'conv'            # mlp, conv
+    bias:bool= False               # enables bias for all learning modules
+    rope_theta:float= 10000.0      # RoPE base value
+    use_input_norm:bool= True      # "online" normalization from Non-stationary Transformer
+    emb_norm_type:str|None= 'layer'  # layer, rms
+    output_head_dropout:float= 0.  # dropout before unpatching
+    use_qk_norm:bool= False
+    headwise_attn_gate:bool= False
+    c_att_mode:str= 'full'         # full, first
     exp_segment_size:int|list= 1
 
 

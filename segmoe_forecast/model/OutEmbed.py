@@ -136,7 +136,7 @@ class UnPatch(nn.Module):
     def __init__(self, patch_width, channels, d_model, dropout=0.2, bias=False) -> None:
         super(UnPatch, self).__init__()
         assert d_model % 4 == 0, "d_model must be divisible by 4"
-        self.channels = channels
+        self.channels= channels
         hidden_dim= round_channels(d_model // 4)
         out_channels= 1
         # calculate kernel_size and padding of the depthwise conv based on patch_width
@@ -311,7 +311,6 @@ class EncoderHead(nn.Module):
                  dropout=0.2, head_type='mlp', bias=False, fine_tune=False, unpatch='conv') -> None:
         super(EncoderHead, self).__init__()
         self.forecasting= forecasting
-        self.channels= channels
 
         if forecasting:
             # encoder forecasting head
