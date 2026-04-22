@@ -44,7 +44,6 @@ class BaseConfig:
     - output_head_dropout (float): Default is 0.0 Dropout before unpatching head.
     - use_qk_norm (bool): Default is False. Enables the QK functional RMSNorm after RoPE.
     - headwise_attn_gate (bool): Default is False. Enables headwise attention gate.
-    - c_att_mode (str): Default is 'full'. Cross Attn (multi_modal) across the model. Can be 'full' or 'first'.
     - exp_segment_size (int|list): Default is 1. Defines the segment size for MoE layers.
     """
     patch_width:int= 16
@@ -80,7 +79,6 @@ class BaseConfig:
     output_head_dropout:float= 0.  # dropout before unpatching
     use_qk_norm:bool= False
     headwise_attn_gate:bool= False
-    c_att_mode:str= 'full'         # full, first
     exp_segment_size:int|list= 1
 
 

@@ -45,7 +45,7 @@ class TSFTransformer(nn.Module):
         diff_attn=False, ffn_type='mlp', glu=False, n_experts=8, top_k_experts=2, experts_type='mlp',
         output_head_type='mlp', fine_tune=True, unpatch='conv', bias=False, rope_theta=10000.0,
         use_input_norm=True, emb_norm_type='layer', output_head_dropout=0., use_qk_norm=False, headwise_attn_gate=False,
-        c_att_mode='full', exp_segment_size=1
+        exp_segment_size=1
     ) -> None:
         super(TSFTransformer, self).__init__()
         assert patch_width > 0, "patch_width must be greater than zero"
@@ -63,7 +63,7 @@ class TSFTransformer(nn.Module):
         output_head_type= output_head_type.lower()
         unpatch= unpatch.lower()
         emb_norm_type= emb_norm_type.lower() if isinstance(emb_norm_type, str) else emb_norm_type
-        c_att_mode= c_att_mode.lower()
+        c_att_mode='full'
 
         self.n_outputs= int(n_outputs)
         self.is_causal= is_causal
@@ -135,7 +135,7 @@ class TSFTransformer(nn.Module):
             n_heads, n_kv_heads, d_ff, dropout, drop_path, norm_type, flash_attn, diff_attn,
             ffn_type, glu, n_experts, top_k_experts, experts_type, output_head_type, fine_tune,
             unpatch, bias, rope_theta, use_input_norm, emb_norm_type, output_head_dropout, use_qk_norm,
-            headwise_attn_gate, c_att_mode, exp_segment_size
+            headwise_attn_gate, exp_segment_size
         )
 
 
