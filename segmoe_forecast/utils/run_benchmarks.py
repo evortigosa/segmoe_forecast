@@ -83,7 +83,7 @@ def build_parser():
     parser.add_argument("--verbose", action=argparse.BooleanOptionalAction, default=True,
                         help="Enable or disable text infos")
     # model
-    parser.add_argument("--model-size",  type=parse_value, default='base', help="Type of model configuration")
+    parser.add_argument("--model-size",  type=parse_value, default='small', help="Type of model configuration")
     parser.add_argument("--block-size",  type=int, default=512, help="Input sequence length / context window")
     parser.add_argument("--patch-width", type=int, default=8, help="Patch width")
     parser.add_argument("--width-factor",type=float, default=4, help="Output patch width")
