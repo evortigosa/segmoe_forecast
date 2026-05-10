@@ -119,13 +119,13 @@ class TSFTransformer(nn.Module):
             if self.mask_layer is not None:
                 self.head= EncoderSSLHead(
                     self.patch_width, patch_dim, channels, d_model, d_ff, self.block_size, output_head_dropout,
-                    output_head_type, bias, fine_tune, unpatch
+                    'random', output_head_type, bias, fine_tune, unpatch
                 )
             else:
                 out_dim= self.block_size if self.forecasting else self.n_outputs
                 self.head= EncoderHead(
                     self.forecasting, self.patch_width, patch_dim, channels, d_model, d_ff, out_dim,
-                    output_head_dropout, output_head_type, bias, fine_tune, unpatch
+                    output_head_dropout, 'random', output_head_type, bias, fine_tune, unpatch
                 )
         self.set_horizon(self.forecast_lst)
 
