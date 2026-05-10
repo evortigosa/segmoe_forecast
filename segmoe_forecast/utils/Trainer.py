@@ -61,22 +61,38 @@ class Trainer:
         self._log= self._build_logger(f"{self.__class__.__name__}")
 
 
+    def get_checkpoint_path(self, filename:str, checkpoint_dir:str) -> str:
+        """
+        Return the path to the checkpoint file.
+        """
+        if (filename is not None) and (checkpoint_dir is None):
+            # assume that filename holds the complete checkpoint_path
+            checkpoint_path= os.path.join(filename)
+        elif (filename is None) and (checkpoint_dir is not None):
+            # filename takes the default value
+            checkpoint_path= os.path.join(checkpoint_dir, f'{self.filename}.pth')
+        else:
+            if (filename is None) and (checkpoint_dir is None):
+                checkpoint_dir= self.checkpoint_dir
+                filename= f'{self.filename}.pth'
+            checkpoint_path= os.path.join(str(checkpoint_dir), str(filename))
+
+        return str(checkpoint_path)
+
+
     def _build_logger(self, name):
         """
         Build a logger for the Trainer class.
         """
-        filename= f'{self.filename}.log'
-        checkpoint_dir= self.checkpoint_dir
-        os.makedirs(checkpoint_dir, exist_ok=True)
-        log_path= os.path.abspath(os.path.join(checkpoint_dir, filename))
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+        log_path= self.get_checkpoint_path(f'{self.filename}.log', self.checkpoint_dir)
 
         logger= logging.getLogger(name)
         logger.setLevel(logging.INFO)
         logger.propagate= False
 
         fmt= logging.Formatter(
-            fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S"
+            fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
         )
         # file handler
         for h in logger.handlers:
@@ -88,6 +104,183 @@ class Trainer:
         logger.addHandler(fh)
 
         return logger
+
+
+    @staticmethod
+    def _format_dt(seconds) -> str:
+        ms= seconds * 1000
+        seconds, milliseconds= divmod(ms, 1000)
+        minutes, seconds= divmod(seconds, 60)
+        hours, minutes= divmod(minutes, 60)
+
+        return f"{int(hours):02d}:{int(minutes):02d}:{int(seconds):02d}.{int(milliseconds):03d}"
+
+
+    def _reset_cuda_memory_stats(self, empty_cache=False, reset_peak_memory=False):
+        """
+        Empty cache (empty_cache=True) and reset the maximum peak GPU memory usage
+        (reset_peak_memory=True).
+        """
+        if self.device.type == 'cuda':
+            if empty_cache:
+                torch.cuda.empty_cache()
+            if reset_peak_memory:
+                torch.cuda.synchronize(self.device)
+                torch.cuda.reset_peak_memory_stats(self.device)
+
+
+    def _get_cuda_memory_stats(self) -> float:
+        """
+        Return the maximum peak GPU memory usage in GB.
+        """
+        if self.device.type == 'cuda':
+            torch.cuda.synchronize(self.device)
+            peak_vram= torch.cuda.max_memory_allocated(self.device)/1024**3
+            return peak_vram
+
+        return 0.
+
+
+    @staticmethod
+    def _get_minibatch(batch, use_time_features:bool):
+        """
+        Minibatch construction from a DataLoader batch.
+        """
+        if use_time_features:
+            data, target, data_time, target_time= batch
+        else:
+            data, target= batch
+            data_time  = None
+            target_time= None
+
+        return data, target, data_time, target_time
+
+
+    @torch.inference_mode()
+    def test(self, test_loader=None, test_criterion=nn.MSELoss(reduction='none'), inverse_transform=False):
+        """
+        Test the model on a test set.
+        Returns the mean test loss, test predictions, and test labels.
+        """
+        test_loader= self.test_loader if test_loader is None else test_loader
+        assert test_loader is not None, "test_loader cannot refer to None"
+
+        self.model.eval()
+        test_criterion= test_criterion if test_criterion is not None else self.criterion
+        test_loss= 0.0
+        n_samples= 0
+        all_logits, all_trues= [], []
+
+        if self.train_ds_scaler is not None:
+            inverse_transform= inverse_transform
+            scale_= torch.from_numpy(self.train_ds_scaler.scale_).float().view(1,-1,1).to(self.device)
+            mean_ = torch.from_numpy(self.train_ds_scaler.mean_).float().view(1,-1,1).to(self.device)
+        else:
+            inverse_transform= False
+            scale_= 1.
+            mean_ = 0.
+
+        start= time.time()
+        self._reset_cuda_memory_stats(empty_cache=True, reset_peak_memory=True)
+
+        for batch in tqdm(test_loader, desc='Testing', disable=self.disable_tqdm):
+            # --- minibatch construction ---
+            data, target, data_time, target_time= self._get_minibatch(batch, self.use_time_features)
+            data, target= data.to(self.device), target.to(self.device)
+            data_time= data_time.to(self.device) if isinstance(data_time, torch.Tensor) else None
+            target_time= target_time.to(self.device) if isinstance(target_time, torch.Tensor) else None
+
+            # --- forward pass and get loss ---
+            if self.model.forecasting:
+                logits= self.model.forecast(data, ts_mark=data_time, ts_mark_future=target_time)
+                if inverse_transform:
+                    # invert the scaling back to the original units
+                    logits= logits * scale_ + mean_
+                    target= target * scale_ + mean_
+            else:
+                logits, *_= self.model(data, ts_mark=data_time)
+            losses= test_criterion(logits, target)
+            loss= torch.mean(losses)
+
+            # --- register preds and trues ---
+            test_loss += float(loss.item()) * data.size(0)
+            n_samples += data.size(0)
+            all_logits.append(logits.cpu())
+            all_trues.append(target.cpu())
+
+        test_loss= test_loss / n_samples
+
+        peak_vram= self._get_cuda_memory_stats()
+        end= time.time()
+        dt = self._format_dt(end - start)
+        self._log.info(
+            "test | test_loss=%.6f | loss type=%s | peak GPU mem=%.2fGB | dt=%sms",
+            test_loss, f'{test_criterion}', peak_vram, dt
+        )
+
+        return test_loss, torch.cat(all_logits, dim=0), torch.cat(all_trues, dim=0)
+
+
+    @torch.inference_mode()
+    def validate(self, val_criterion=nn.MSELoss(reduction='none')):
+        """
+        Validate the model on a validation set.
+        """
+        self.model.eval()
+        val_criterion= val_criterion if val_criterion is not None else self.criterion
+        val_loss= 0.0
+        n_samples= 0
+
+        for batch in tqdm(self.val_loader, desc='Validating', disable=self.disable_tqdm):
+            # --- minibatch construction ---
+            data, target, data_time, _= self._get_minibatch(batch, self.use_time_features)
+            data, target= data.to(self.device), target.to(self.device)
+            data_time= data_time.to(self.device) if isinstance(data_time, torch.Tensor) else None
+
+            # --- forward pass and get loss ---
+            logits, *_= self.model(data, ts_mark=data_time)
+            losses= val_criterion(logits, target)
+            loss= torch.mean(losses)
+
+            val_loss += float(loss.item()) * data.size(0)
+            n_samples+= data.size(0)
+
+        val_loss= val_loss / n_samples
+
+        return val_loss
+
+
+    @torch.inference_mode()
+    def validate_bf16(self, val_criterion=nn.MSELoss(reduction='none')):
+        """
+        Validate the model on a validation set using bfloat16.
+        """
+        assert self.device.type == 'cuda', "BF16 training requires CUDA"
+
+        self.model.eval()
+        val_criterion= val_criterion if val_criterion is not None else self.criterion
+        val_loss= 0.0
+        n_samples= 0
+
+        for batch in tqdm(self.val_loader, desc='Validating', disable=self.disable_tqdm):
+            # --- minibatch construction ---
+            data, target, data_time, _= self._get_minibatch(batch, self.use_time_features)
+            data, target= data.to(self.device), target.to(self.device)
+            data_time= data_time.to(self.device) if isinstance(data_time, torch.Tensor) else None
+
+            # --- forward pass and get loss ---
+            # model defined as usual; model parameters kept as float32
+            with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
+                logits, *_= self.model(data, ts_mark=data_time)
+                losses= val_criterion(logits, target)
+                loss= torch.mean(losses)
+
+                val_loss += float(loss.item()) * data.size(0)
+                n_samples+= data.size(0)
+
+        val_loss= val_loss / n_samples
+
+        return val_loss
 
 
     def train_one_epoch(self, epoch, clip_grad=None, get_moe_metrics=False):
@@ -105,21 +298,15 @@ class Trainer:
             self.optimizer.zero_grad(set_to_none=True)
 
             # --- minibatch construction ---
-            if self.use_time_features:
-                data, target, data_time, _= batch
-                data_time= data_time.to(self.device)
-            else:
-                data, target= batch
-                data_time= None
-
-            data  = data.to(self.device)
-            target= target.to(self.device)
+            data, target, data_time, _= self._get_minibatch(batch, self.use_time_features)
+            data, target= data.to(self.device), target.to(self.device)
+            data_time= data_time.to(self.device) if isinstance(data_time, torch.Tensor) else None
             padding_mask= None
             if self.augmentation is not None:
                 data= (self.augmentation(data)).to(self.device)
 
             # --- forward pass and get loss ---
-            logits, router_logits, *_= self.model(data, ts_mark=data_time)
+            logits, router_probs, *_= self.model(data, ts_mark=data_time)
             # compute training loss on the scaled data
             losses= self.criterion(logits, target)
             loss= torch.mean(losses)
@@ -130,7 +317,7 @@ class Trainer:
 
             if self.aux_criterion is not None:
                 aux_loss, global_metrics, layer_metrics= self.aux_criterion(
-                    router_logits, padding_mask, get_moe_metrics
+                    router_probs, padding_mask, get_moe_metrics
                 )
                 loss= loss + aux_loss
 
@@ -186,15 +373,9 @@ class Trainer:
             self.optimizer.zero_grad(set_to_none=True)
 
             # --- minibatch construction ---
-            if self.use_time_features:
-                data, target, data_time, _= batch
-                data_time= data_time.to(self.device)
-            else:
-                data, target= batch
-                data_time= None
-
-            data  = data.to(self.device)
-            target= target.to(self.device)
+            data, target, data_time, _= self._get_minibatch(batch, self.use_time_features)
+            data, target= data.to(self.device), target.to(self.device)
+            data_time= data_time.to(self.device) if isinstance(data_time, torch.Tensor) else None
             padding_mask= None
             if self.augmentation is not None:
                 data= (self.augmentation(data)).to(self.device)
@@ -202,7 +383,7 @@ class Trainer:
             # --- forward pass and get loss ---
             # model, optimizer defined as usual; model parameters kept as float32
             with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
-                logits, router_logits, *_= self.model(data, ts_mark=data_time)
+                logits, router_probs, *_= self.model(data, ts_mark=data_time)
                 # compute training loss on the scaled data
                 losses= self.criterion(logits, target)
                 loss= torch.mean(losses)
@@ -213,7 +394,7 @@ class Trainer:
 
                 if self.aux_criterion is not None:
                     aux_loss, global_metrics, layer_metrics= self.aux_criterion(
-                        router_logits, padding_mask, get_moe_metrics
+                        router_probs, padding_mask, get_moe_metrics
                     )
                     loss= loss + aux_loss
 
@@ -254,40 +435,6 @@ class Trainer:
         return train_loss, epoch_lr
 
 
-    def validate(self, val_criterion=nn.MSELoss(reduction='none')):
-        """
-        Validate the model on a validation set.
-        """
-        self.model.eval()
-        val_criterion= val_criterion if val_criterion is not None else self.criterion
-        val_loss= 0.0
-        n_samples= 0
-
-        with torch.no_grad():
-            for batch in tqdm(self.val_loader, desc='Validating', disable=self.disable_tqdm):
-                # --- minibatch construction ---
-                if self.use_time_features:
-                    data, target, data_time, _= batch
-                    data_time= data_time.to(self.device)
-                else:
-                    data, target= batch
-                    data_time= None
-                data  = data.to(self.device)
-                target= target.to(self.device)
-
-                # --- forward pass and get loss ---
-                logits, *_= self.model(data, ts_mark=data_time)
-                losses= val_criterion(logits, target)
-                loss= torch.mean(losses)
-
-                val_loss += float(loss.item()) * data.size(0)
-                n_samples+= data.size(0)
-
-        val_loss= val_loss / n_samples
-
-        return val_loss
-
-
     def train(self, epochs, eval_interval=1, use_bf16=False, clip_grad=None, get_moe_metrics=False) -> None:
         """
         Train the model for a specified number of epochs, performing validation and checkpointing.
@@ -295,8 +442,7 @@ class Trainer:
         self._log.info(f"train | use_bf16={use_bf16}, clip_grad={clip_grad}, get_moe_metrics={get_moe_metrics}")
         self._log.info(f"train | Model full config: {self.model.config}")
 
-        if self.device.type == 'cuda':
-            torch.cuda.empty_cache()
+        self._reset_cuda_memory_stats(empty_cache=True)
 
         if get_moe_metrics and self.expert_traker is None:
             self.expert_traker= ExpertUsageTracker(self.model.config.n_experts, self.model.config.n_layer)
@@ -308,6 +454,8 @@ class Trainer:
 
         for epoch in range(epochs):
             start= time.time()
+            self._reset_cuda_memory_stats(reset_peak_memory=True)
+
             if self.expert_traker is not None:
                 self.expert_traker.reset_epoch()
 
@@ -322,7 +470,10 @@ class Trainer:
             self.lr_hist.append(epoch_lr)
 
             if self.do_validation and (epoch % eval_interval == 0 or epoch == epochs-1):
-                val_loss= self.validate()
+                if use_bf16:
+                    val_loss= self.validate_bf16()
+                else:
+                    val_loss= self.validate()
                 did_validation= True
             else:
                 did_validation= False
@@ -331,24 +482,25 @@ class Trainer:
             if self.expert_traker is not None:
                 self.expert_traker.finalize_epoch()
 
+            peak_vram= self._get_cuda_memory_stats()
             end= time.time()
-            dt = end - start
+            dt = self._format_dt(end - start)
 
             if did_validation:
-                self._log.info(
-                    "train | epoch=%d/%d | train_loss=%.6f | val_loss=%.6f | lr=%.3e | dt=%.2fs",
-                    epoch + 1, epochs, train_loss, val_loss, epoch_lr, dt
-                )
-                if self.verbose:
-                    print(f'Train loss: {train_loss:.4f}')
-                    print(f'Valid loss: {val_loss:.4f} | epoch: {epoch + 1} | dt/epoch: {dt*1000:.2f}ms')
-            else:  # did_validation is False
-                self._log.info(
-                    "train | epoch=%d/%d | train_loss=%.6f | val_loss not computed | lr=%.3e | dt=%.2fs",
-                    epoch + 1, epochs, train_loss, epoch_lr, dt
-                )
-                if self.verbose:
-                    print(f'Train loss: {train_loss:.4f} | epoch: {epoch + 1} | dt/epoch: {dt*1000:.2f}ms')
+                val_loss_log = f'{val_loss:.6f}'
+                val_loss_verb= f'Valid loss: {val_loss_log} | '
+            else:
+                val_loss_log = 'N/A'  # did_validation is False
+                val_loss_verb= ''
+
+            self._log.info(
+                "train | epoch=%d/%d | train_loss=%.6f | val_loss=%s | lr=%.3e | peak GPU mem=%.2fGB | dt=%sms",
+                epoch + 1, epochs, train_loss, val_loss_log, epoch_lr, peak_vram, dt
+            )
+            if self.verbose:
+                print(f'Train loss: {train_loss:.6f}')
+                print(f'{val_loss_verb}epoch: {epoch+1}/{epochs} | lr: {epoch_lr:.6f} | '
+                      f'peak GPU mem: {peak_vram:.2f}GB | dt/epoch: {dt}ms')
 
             if did_validation:
                 if val_loss < best_val_loss:
@@ -363,105 +515,25 @@ class Trainer:
                     avg_val_loss= np.mean(self.val_losses)
                     if self.early_stopping(avg_val_loss, epoch+1):
                         self._log.warning(
-                            "train | early_stopping_triggered | epoch=%d | avg_val_loss=%.6f",
-                            epoch + 1, avg_val_loss
+                            "train | early_stopping_triggered | epoch=%d | avg_val_loss=%.6f", epoch+1, avg_val_loss
                         )
                         if self.verbose:
                             print(f'[WARNING] Early stopping triggered during training at epoch {epoch+1}')
                         break
 
         if did_validation:
-            self._log.info("train | Best Validation Loss: %.6f | Epoch: %d", best_val_loss, best_epoch + 1)
+            self._log.info("train | Best Validation Loss: %.6f | Epoch: %d", best_val_loss, best_epoch+1)
             if self.verbose:
-                print(f'Best Validation Loss: {best_val_loss:.4f} (Epoch {best_epoch + 1})')
+                print(f'Best Validation Loss: {best_val_loss:.6f} (Epoch {best_epoch+1})')
             # Save a final checkpoint only if the last epoch equals the best epoch.
             if best_epoch == epochs - 1 and self.checkpointing:
                 self.save_checkpoint(best_epoch, best_val_loss)
 
 
-    def test(self, test_loader=None, test_criterion=nn.MSELoss(reduction='none'), inverse_transform=False):
-        """
-        Test the model on a test set.
-        Returns the mean test loss, test predictions, and test labels.
-        """
-        if self.device.type == 'cuda':
-            torch.cuda.empty_cache()
-
-        test_loader= self.test_loader if test_loader is None else test_loader
-        assert test_loader is not None, "test_loader cannot refer to None"
-
-        if self.train_ds_scaler is not None:
-            inverse_transform= inverse_transform
-            scale_= torch.from_numpy(self.train_ds_scaler.scale_).float().view(1,-1,1).to(self.device)
-            mean_ = torch.from_numpy(self.train_ds_scaler.mean_).float().view(1,-1,1).to(self.device)
-        else:
-            inverse_transform= False
-            scale_= 1.
-            mean_ = 0.
-
-        self.model.eval()
-        test_criterion= test_criterion if test_criterion is not None else self.criterion
-        test_loss= 0.0
-        n_samples= 0
-        all_logits, all_trues= [], []
-
-        with torch.no_grad():
-            for batch in tqdm(test_loader, desc='Testing', disable=self.disable_tqdm):
-                # --- minibatch construction ---
-                if self.use_time_features:
-                    data, target, data_time, target_time= batch
-                    data_time  = data_time.to(self.device)
-                    target_time= target_time.to(self.device)
-                else:
-                    data, target= batch
-                    data_time  = None
-                    target_time= None
-                data  = data.to(self.device)
-                target= target.to(self.device)
-
-                # --- forward pass and get loss ---
-                if self.model.forecasting:
-                    logits= self.model.forecast(data, ts_mark=data_time, ts_mark_future=target_time)
-                    if inverse_transform:
-                        # invert the scaling back to the original units
-                        logits= logits * scale_ + mean_
-                        target= target * scale_ + mean_
-                else:
-                    logits, *_= self.model(data, ts_mark=data_time)
-                losses= test_criterion(logits, target)
-                loss= torch.mean(losses)
-
-                # --- register preds and trues ---
-                test_loss += float(loss.item()) * data.size(0)
-                n_samples += data.size(0)
-                all_logits.append(logits.cpu())
-                all_trues.append(target.cpu())
-
-        test_loss= test_loss / n_samples
-
-        return test_loss, torch.cat(all_logits, dim=0), torch.cat(all_trues, dim=0)
-
-
-    def get_checkpoint_path(self, filename:str, checkpoint_dir:str):
-
-        if (filename is not None) and (checkpoint_dir is None):
-            # assume that filename holds the complete checkpoint_path
-            checkpoint_path= os.path.join(filename)
-        elif (filename is None) and (checkpoint_dir is not None):
-            # filename takes the default value
-            checkpoint_path= os.path.join(checkpoint_dir, f'{self.filename}.pth')
-        else:
-            if (filename is None) and (checkpoint_dir is None):
-                checkpoint_dir= self.checkpoint_dir
-                filename= f'{self.filename}.pth'
-            checkpoint_path= os.path.join(str(checkpoint_dir), str(filename))
-
-        return str(checkpoint_path)
-
-
     def save_checkpoint(self, epoch, best_val_loss) -> None:
         """
         Save the model checkpoint to disk, including training history.
+        - save expert tracker (if not None): traker_path is {checkpoint_path}_expert_traker.pt
         """
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         checkpoint_path= self.get_checkpoint_path(f'{self.filename}.pth', self.checkpoint_dir)
@@ -485,8 +557,7 @@ class Trainer:
                 torch.save(self.expert_traker.state_dict(), traker_path)
 
             self._log.info(
-                "save_checkpoint | epoch=%d | best_val_loss=%.6f | saved at %s",
-                epoch + 1, best_val_loss, checkpoint_path
+                "save_checkpoint | epoch=%d | best_val_loss=%.6f | saved at %s", epoch+1, best_val_loss, checkpoint_path
             )
             if self.verbose:
                 print(f"[INFO] Checkpoint saved at '{checkpoint_path}'")
@@ -498,7 +569,7 @@ class Trainer:
 
 
     @staticmethod
-    def strip_module_prefix(state_dict):
+    def _strip_module_prefix(state_dict):
         """
         Remove a single leading 'module.' from keys if present.
         """
@@ -511,7 +582,8 @@ class Trainer:
                         restore_metadata=False) -> tuple:
         """
         This method loads the checkpoint from the given path and restores the model, optimizer
-        (optional, when restore_optimizer=True), and training history.
+        (optional, when restore_optimizer=True), and training history (optional, when restore_metadata=True).
+        - restore expert tracker (optional): expected traker_path is {checkpoint_path}_expert_traker.pt
         - TODO: Fix dtype, device, and layout for optimizer state loading.
         """
         checkpoint_path= self.get_checkpoint_path(filename, checkpoint_dir)
@@ -523,9 +595,9 @@ class Trainer:
             raise RuntimeError("self.model is None: instantiate model before restoring state_dict")
 
         try:
-            checkpoint= torch.load(checkpoint_path, map_location=self.device)
+            checkpoint= torch.load(checkpoint_path, map_location=self.device, weights_only=True)
             # restore model state
-            self.model.load_state_dict(self.strip_module_prefix(checkpoint['model_state_dict']))
+            self.model.load_state_dict(self._strip_module_prefix(checkpoint['model_state_dict']))
             # ensure model on target device
             if getattr(self, 'model', None) is not None:
                 self.model.to(self.device)
@@ -543,8 +615,10 @@ class Trainer:
                         self.scheduler.optimizer= self.optimizer
 
             # retrieve training metadata
-            epoch= checkpoint['epoch']
+            epoch= checkpoint.get("epoch", 0)
             best_val_loss= checkpoint.get('best_val_loss', float('inf'))
+            _time= checkpoint.get("timestamp", "N/A")
+            _time= time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(_time)) if _time != "N/A" else "N/A"
             if restore_metadata:
                 self.train_losses= checkpoint.get('train_losses', [])
                 self.val_losses= checkpoint.get('val_losses', [])
@@ -557,7 +631,7 @@ class Trainer:
 
                 if os.path.exists(traker_path) or tracker is not None:
                     if os.path.exists(traker_path):
-                        tracker= torch.load(traker_path, map_location="cpu")
+                        tracker= torch.load(traker_path, map_location="cpu", weights_only=True)
                     self.expert_traker= ExpertUsageTracker(self.model.config.n_experts, self.model.config.n_layer)
                     self.expert_traker.load_state_dict(tracker)
                 else:
@@ -568,11 +642,12 @@ class Trainer:
                         print("[WARNING] No MoE usage history to load: skipping expert_traker restore.")
 
             self._log.info(
-                "load_checkpoint | Checkpoint loaded from '%s'. Resuming training with best validation loss of %.4f.",
-                checkpoint_path, best_val_loss
+                "load_checkpoint | Checkpoint loaded from '%s'. Resuming training on '%s' with best validation loss of %.6f.",
+                checkpoint_path, _time, best_val_loss
             )
             if self.verbose:
-                print(f"[INFO] Checkpoint loaded from '{checkpoint_path}'. Resuming training with best validation loss of {best_val_loss:.4f}.")
+                print(f"[INFO] Checkpoint loaded from '{checkpoint_path}'. Resuming training on '{_time}' "
+                      f"with best validation loss of {best_val_loss:.6f}.")
             return epoch, best_val_loss
 
         except Exception as e:
@@ -595,7 +670,7 @@ class Trainer:
             raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
 
         try:
-            checkpoint= torch.load(checkpoint_path, map_location='cpu')
+            checkpoint= torch.load(checkpoint_path, map_location='cpu', weights_only=True)
             if 'config' not in checkpoint:
                 raise KeyError("Checkpoint does not contain a 'config' key to build the model")
 
@@ -627,7 +702,7 @@ class Trainer:
             raise e
 
 
-    def save_plot(self, plt_obj, file_name, as_pdf, method_name, info_message, tight=True) -> None:
+    def _save_plot(self, plt_obj, file_name, as_pdf, method_name, info_message, tight=True) -> None:
         plots_dir= f"{self.checkpoint_dir}/plots"
         os.makedirs(plots_dir, exist_ok=True)
         save_path= self.get_checkpoint_path(file_name, plots_dir)
@@ -680,7 +755,7 @@ class Trainer:
         plt.xlabel('Epochs')
         plt.ylabel('Loss')
         plt.legend()
-        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.grid(True, linestyle='--', linewidth=0.6, alpha=0.5)
 
         plt.subplot(1, 2, 2)
         plt.plot(epochs, lr_hist, label='Learning Rate', marker='o', linestyle='-', color='tab:green')
@@ -688,10 +763,10 @@ class Trainer:
         plt.xlabel('Epochs')
         plt.ylabel('Learning Rate')
         plt.legend()
-        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.grid(True, linestyle='--', linewidth=0.6, alpha=0.5)
 
         if save_charts:
-            self.save_plot(plt, file_name, as_pdf, method_name, "Training charts were saved at")
+            self._save_plot(plt, file_name, as_pdf, method_name, "Training charts were saved at")
         if show_plot:
             plt.show()
         plt.close()
@@ -735,7 +810,7 @@ class Trainer:
         plt.xlabel("Epochs")
         plt.ylabel("Value")
         plt.legend()
-        plt.grid(True, linestyle="--", alpha=0.7)
+        plt.grid(True, linestyle="--", linewidth=0.6, alpha=0.5)
 
         plt.subplot(1, 2, 2)
         plt.plot(epochs, cv_hard_hist, label="CV Hard", marker="o", linestyle="-")
@@ -744,10 +819,10 @@ class Trainer:
         plt.xlabel("Epochs")
         plt.ylabel("Coefficient of Variation")
         plt.legend()
-        plt.grid(True, linestyle="--", alpha=0.7)
+        plt.grid(True, linestyle="--", linewidth=0.6, alpha=0.5)
 
         if save_charts:
-            self.save_plot(plt, file_name, as_pdf, method_name, "Routing diagnostic charts were saved at")
+            self._save_plot(plt, file_name, as_pdf, method_name, "Routing diagnostic charts were saved at")
         if show_plot:
             plt.show()
         plt.close()
@@ -815,7 +890,7 @@ class Trainer:
             axes[0].set_title(f"Layer {layer_id} Hard Utilization")
         axes[0].set_xlabel("Epochs")
         axes[0].set_ylabel("Hard Fraction")
-        axes[0].grid(True, linestyle="--", alpha=0.7)
+        axes[0].grid(True, linestyle="--", linewidth=0.6, alpha=0.5)
 
         # soft importance
         for expert_id in range(n_experts):
@@ -829,7 +904,7 @@ class Trainer:
             axes[1].set_title(f"Layer {layer_id} Soft Importance")
         axes[1].set_xlabel("Epochs")
         axes[1].set_ylabel("Soft Fraction")
-        axes[1].grid(True, linestyle="--", alpha=0.7)
+        axes[1].grid(True, linestyle="--", linewidth=0.6, alpha=0.5)
 
         fig.legend(
             handles, labels, loc="lower center", fancybox=True, ncol=legend_ncol, frameon=True,
@@ -855,7 +930,7 @@ class Trainer:
         fig, axes= self._set_expert_usage_plot(hard_hist, soft_hist, cut_first_epoch)
 
         if save_charts:
-            self.save_plot(fig, file_name, as_pdf, method_name, "Expert usage charts were saved at")
+            self._save_plot(fig, file_name, as_pdf, method_name, "Expert usage charts were saved at")
         if show_plot:
             plt.show()
         plt.close(fig)
@@ -885,7 +960,7 @@ class Trainer:
             if save_charts:
                 file_name_curr= f"{file_name}_{layer_id}"
                 info_message  = f"Layer {layer_id} expert usage charts were saved at"
-                self.save_plot(fig, file_name_curr, as_pdf, method_name, info_message)
+                self._save_plot(fig, file_name_curr, as_pdf, method_name, info_message)
             if show_plot:
                 plt.show()
             plt.close(fig)
@@ -971,7 +1046,7 @@ class Trainer:
 
         if save_charts:
             info_message= "Expert usage heatmaps were saved at"
-            self.save_plot(fig, file_name, as_pdf, method_name, info_message, tight=False)
+            self._save_plot(fig, file_name, as_pdf, method_name, info_message, tight=False)
         if show_plot:
             plt.show()
         plt.close(fig)
@@ -1002,7 +1077,7 @@ class Trainer:
             if save_charts:
                 file_name_curr= f"{file_name}_{layer_id}"
                 info_message  = f"Layer {layer_id} expert usage heatmaps were saved at"
-                self.save_plot(fig, file_name_curr, as_pdf, method_name, info_message, tight=False)
+                self._save_plot(fig, file_name_curr, as_pdf, method_name, info_message, tight=False)
             if show_plot:
                 plt.show()
             plt.close(fig)
