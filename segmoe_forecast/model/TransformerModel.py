@@ -390,7 +390,7 @@ class MultiHeadedAttention(nn.Module):
         )
 
 
-    def forward(self, xq, xk, xv, start_pos, inference, causal_mask=None, flash_attn=True):
+    def forward(self, xq, xk, xv, inference, causal_mask=None, flash_attn=True):
         B, T, C= xq.size()  # x(batch_size, sequence length, d_model)
         assert C == self.d_model, "Input embedding dimension must match model embedding dimension"
 
@@ -405,12 +405,13 @@ class MultiHeadedAttention(nn.Module):
             attn_gate= attn_gate.reshape(B, T, -1, 1)
             q= q.reshape(B, T, -1, self.d_head)
         else:
-            q= q.view(B, -1, self.n_heads * self.diff_factor,  self.d_head)  # q view -> (B, T, nh,   dh)
+            q= q.view(B, -1, self.n_heads * self.diff_factor, self.d_head)  # q view -> (B, T, nh,   dh)
 
         # reshape for Group Query Multi-Headed Attention (double n_heads for q and k when diff_attn)
         k= k.view(B, -1, self.n_kv_heads * self.diff_factor,  self.d_head)  # k view -> (B, T, nkvh, dh)
         v= v.view(B, -1, self.n_kv_heads,  self.diff_factor * self.d_head)  # v view -> (B, T, nkvh, dh)
         # apply RoPE to query and key embeddings
+        start_pos= 0
         q, k= self.ropenc(q, k, start_pos, inference)
         if self.use_qk_norm:
             q, k= self.norm(q), self.norm(k)  # QK norm
@@ -419,11 +420,11 @@ class MultiHeadedAttention(nn.Module):
         k= self.repeat_kv(k, self.n_rep)  # k -> (B, T, nh, dh)
         v= self.repeat_kv(v, self.n_rep)  # v -> (B, T, nh, dh)
         # to compute Attention, we need to bring heads at dim 1 and T at dim 2
-        q= q.transpose(1, 2)
-        k= k.transpose(1, 2)  # q,k,v transp -> (B, nh, T, dh)
-        v= v.transpose(1, 2)
+        q= q.transpose(1, 2).contiguous()
+        k= k.transpose(1, 2).contiguous()  # q,k,v transp -> (B, nh, T, dh)
+        v= v.transpose(1, 2).contiguous()
 
-        if flash_attn and (not inference):
+        if flash_attn:
             # applies FlashAttention
             is_causal= False if causal_mask is None else True
 
@@ -483,8 +484,8 @@ class TransformerBlock(nn.Module):
     def __init__(self, multi_modal, depth, d_model=384, block_size=512, n_heads=12, n_kv_heads=6,
                  d_ff=768, dropout=0.2, drop_path=0.3, norm_type='rms', diff_attn=False,
                  ffn_type='mlp', glu=False, n_experts=4, top_k_experts=1, experts_type='mlp',
-                 bias=False, rope_theta=10000.0, use_qk_norm=False, headwise_attn_gate=False,
-                 c_att_mode='full', exp_segment_size=1) -> None:
+                 exp_route_dropout=0.1, bias=False, rope_theta=10000.0, use_qk_norm=False,
+                 headwise_attn_gate=False, c_att_mode='full', exp_segment_size=1) -> None:
         super(TransformerBlock, self).__init__()
 
         # Self-Attention module to endogenous series
@@ -511,17 +512,18 @@ class TransformerBlock(nn.Module):
         if int(exp_segment_size) > 1:
             self.moeff= MoESegment(
                 d_model, d_ff, dropout, ffn_type, False, glu, n_experts, top_k_experts, experts_type,
-                bias, exp_segment_size
+                exp_route_dropout, bias, exp_segment_size
             )
         else:
             self.moeff= MoEFeedForward(
                 d_model, d_ff, dropout, ffn_type, False, glu, n_experts, top_k_experts, experts_type,
-                bias
+                exp_route_dropout, bias
             )
         self.drop_path3= DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
 
-    def get_norm(self, norm_type, d_model, init_alpha=0.5):
+    @staticmethod
+    def get_norm(norm_type, d_model, init_alpha=0.5):
         if norm_type == 'rms':
             return RMSNorm(d_model)
         elif norm_type == 'dyt':
@@ -530,20 +532,20 @@ class TransformerBlock(nn.Module):
             return nn.LayerNorm(d_model)
 
 
-    def forward(self, x, x_cross, start_pos, inference, causal_mask=None, flash_attn=True):
+    def forward(self, x, x_cross, inference, causal_mask=None, flash_attn=True):
         x_norm= self.norm1(x)
         x= x + self.drop_path1(self.s_att(
-            x_norm, x_norm, x_norm, start_pos, inference, causal_mask, flash_attn
+            x_norm, x_norm, x_norm, inference, causal_mask, flash_attn
         ))
         if (self.c_att is not None) and (x_cross is not None):
             x_norm= self.norm2(x)
             x= x + self.drop_path2(self.c_att(  # no causal_mask in cross-attention
-                x_norm, x_cross, x_cross, start_pos, inference, None, flash_attn
+                x_norm, x_cross, x_cross, inference, None, flash_attn
             ))
         x_norm= self.norm3(x)
         x= x + self.drop_path3(self.moeff(x_norm))
 
-        return x, self.moeff.router_logits
+        return x, self.moeff.router_probs
 
 
 
@@ -565,10 +567,10 @@ class TransformerModel(nn.Module):
     """
 
     def __init__(self, multi_modal, is_causal, n_layer=8, d_model=384, block_size=512, n_heads=12,
-                 n_kv_heads=6, d_ff=768, dropout=0.2, drop_path=0.3, norm_type='rms', flash_attn=True,
-                 diff_attn=False, ffn_type='mlp', glu=False, n_experts=4, top_k_experts=1,
-                 experts_type='mlp', bias=False, rope_theta=10000.0, use_qk_norm=False, headwise_attn_gate=False,
-                 c_att_mode='full', exp_segment_size=1) -> None:
+                 n_kv_heads=6, d_ff=768, dropout=0.2, drop_path=0.3, norm_type='rms', diff_attn=False,
+                 ffn_type='mlp', glu=False, n_experts=4, top_k_experts=1, experts_type='mlp',
+                 exp_route_dropout=0.1, bias=False, rope_theta=10000.0, use_qk_norm=False,
+                 headwise_attn_gate=False, c_att_mode='full', exp_segment_size=1) -> None:
         super(TransformerModel, self).__init__()
         # block_size represents the max sequence length
         self.block_size= block_size
@@ -578,10 +580,8 @@ class TransformerModel(nn.Module):
             torch.tril(torch.ones(block_size, block_size)).view(1, 1, block_size, block_size),
             persistent=False
         )
-        # set the causal mask and FlashAttention use
-        self.flash_attn = flash_attn
-        self.causal_mask= None
-        self.def_causal_mask(is_causal, self.flash_attn)
+        # causal mask is True when TransformerModel is a Decoder, and None when it is an Encoder
+        self.causal_mask= True if is_causal else None
         # stochastic decay according to each TransformerBlock depth
         sdp_rates= [x.item() for x in torch.linspace(0, drop_path, n_layer)]
 
@@ -600,8 +600,8 @@ class TransformerModel(nn.Module):
             TransformerBlock(
                 multi_modal, depth, d_model, block_size, n_heads, n_kv_heads, d_ff, dropout,
                 sdp_rates[depth], norm_type, diff_attn, ffn_type, glu, n_experts, top_k_experts,
-                experts_type, bias, rope_theta, use_qk_norm, headwise_attn_gate, c_att_mode,
-                exp_segment_size[depth]
+                experts_type, exp_route_dropout, bias, rope_theta, use_qk_norm, headwise_attn_gate,
+                c_att_mode, exp_segment_size[depth]
             ) for depth in range(n_layer)
         ])
         # final normalization layer after the last TransformerBlock
@@ -612,13 +612,11 @@ class TransformerModel(nn.Module):
         """
         If is_causal=True, we have a Decoder Transformer; otherwise, an Encoder Transformer.
         """
-        self.flash_attn= flash_attn
-
-        if is_causal and (not self.flash_attn):
-            # causal mask tensor on the Attention outputs when TransformerModel is a Decoder, i.e.,
-            # current steps depend on the past only
+        if is_causal and (not flash_attn):
+            # causal mask tensor on the Attention outputs when TransformerModel is a Decoder,
+            # i.e., current steps depend on the past only
             self.causal_mask= self.causal_mask_buffer
-        elif is_causal and self.flash_attn:
+        elif is_causal and flash_attn:
             # causal mask when TransformerModel is a Decoder using FlashAttention
             self.causal_mask= True
         else:
@@ -626,27 +624,22 @@ class TransformerModel(nn.Module):
             self.causal_mask= None
 
 
-    def forward(self, x, x_cross, start_pos, inference):
+    def forward(self, x, x_cross, inference, flash_attn=True):
         B, T, C= x.size()  # x(batch_size, sequence length, d_model)
         assert T <= self.block_size, \
             f"Cannot forward sequence of length {T}, block size is only {self.block_size}"
 
-        if self.causal_mask is not None:
-            if inference:
-                self.def_causal_mask(is_causal=True, flash_attn=False)
-            else:
-                self.def_causal_mask(is_causal=True, flash_attn=self.flash_attn)
+        if self.causal_mask is not None:  # TransformerModel is a Decoder
+            self.def_causal_mask(is_causal=True, flash_attn=flash_attn)
 
-        if isinstance(self.causal_mask, torch.Tensor):
-            if self.causal_mask.device != x.device:
-                self.causal_mask= self.causal_mask.to(x.device)
+            if isinstance(self.causal_mask, torch.Tensor):  # Decoder not using FlashAttention
+                if self.causal_mask.device != x.device:
+                    self.causal_mask= self.causal_mask.to(x.device)
 
-        all_router_logits= ()
+        all_router_probs= ()
         # forward the embedding through the transformer
         for block in self.transformer:
-            x, router_logits= block(
-                x, x_cross, start_pos, inference, self.causal_mask, self.flash_attn
-            )
-            all_router_logits += (router_logits,)
+            x, router_probs= block(x, x_cross, inference, self.causal_mask, flash_attn)
+            all_router_probs += (router_probs,)
 
-        return self.final_norm(x), all_router_logits
+        return self.final_norm(x), all_router_probs

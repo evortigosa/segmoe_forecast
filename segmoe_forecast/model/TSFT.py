@@ -41,8 +41,8 @@ class TSFTransformer(nn.Module):
     def __init__(
         self, patch_width:int, channels:int, n_outputs:int, width_factor:float,
         is_causal=False, forecasting=True, mask_ratio=0., n_layer=6, d_model=256, block_size=512,
-        n_heads=8, n_kv_heads=4, d_ff=512, dropout=0.2, drop_path=0.3, norm_type='rms', flash_attn=True,
-        diff_attn=False, ffn_type='mlp', glu=False, n_experts=8, top_k_experts=2, experts_type='mlp',
+        n_heads=8, n_kv_heads=4, d_ff=512, dropout=0.2, drop_path=0.3, norm_type='rms', diff_attn=False,
+        ffn_type='mlp', glu=False, n_experts=8, top_k_experts=2, experts_type='mlp', exp_route_dropout=0.1,
         output_head_type='mlp', fine_tune=True, unpatch='conv', bias=False, rope_theta=10000.0,
         use_input_norm=True, emb_norm_type='layer', output_head_dropout=0., use_qk_norm=False, headwise_attn_gate=False,
         exp_segment_size=1
@@ -102,8 +102,8 @@ class TSFTransformer(nn.Module):
         # define the backbone transformer model
         self.backbone= TransformerModel(
             multi_modal, is_causal, n_layer, d_model, patch_dim, n_heads, n_kv_heads, d_ff, dropout,
-            drop_path, norm_type, flash_attn, diff_attn, ffn_type, glu, n_experts, top_k_experts,
-            experts_type, bias, rope_theta, use_qk_norm, headwise_attn_gate, c_att_mode, exp_segment_size
+            drop_path, norm_type, diff_attn, ffn_type, glu, n_experts, top_k_experts, experts_type,
+            exp_route_dropout, bias, rope_theta, use_qk_norm, headwise_attn_gate, c_att_mode, exp_segment_size
         )
 
         # identity transformation (no change to the tensor)
@@ -132,8 +132,8 @@ class TSFTransformer(nn.Module):
         self.config= BaseConfig(
             self.patch_width, channels, self.n_outputs, self.width_factor, 
             self.is_causal, self.forecasting, mask_ratio, n_layer, d_model, self.block_size,
-            n_heads, n_kv_heads, d_ff, dropout, drop_path, norm_type, flash_attn, diff_attn,
-            ffn_type, glu, n_experts, top_k_experts, experts_type, output_head_type, fine_tune,
+            n_heads, n_kv_heads, d_ff, dropout, drop_path, norm_type, diff_attn, ffn_type, glu,
+            n_experts, top_k_experts, experts_type, exp_route_dropout, output_head_type, fine_tune,
             unpatch, bias, rope_theta, use_input_norm, emb_norm_type, output_head_dropout, use_qk_norm,
             headwise_attn_gate, exp_segment_size
         )
@@ -238,7 +238,7 @@ class TSFTransformer(nn.Module):
         self.eval()
         try:
             for i in range(n_patches):
-                logits, _= self.forward(ts, 0, ts_mark=ts_mark)
+                logits, *_= self.forward(ts, ts_mark=ts_mark, flash_attn=False)
                 if end_f_patch_width > 0:
                     future= logits[:, :, -f_patch_width:-end_f_patch_width]
                 else:
@@ -270,7 +270,11 @@ class TSFTransformer(nn.Module):
         return "--- Encoder-only model ---"
 
 
-    def forward(self, ts, start_pos=0, ts_mark=None):
+    def forward(self, ts, ts_mark=None, flash_attn=True):
+        """
+        - ts_mark (optional): Input tensor for exogenous covariates.
+        - flash_attn (bool): Default is True. Enables FlashAttention.
+        """
         B, C, T= ts.size()  # ts (batch_size, channels/features, seq_length)
         assert T <= self.block_size, \
             f'Cannot forward sequence of length {T}, time window is only {self.block_size}'
@@ -293,7 +297,7 @@ class TSFTransformer(nn.Module):
             x= self.mask_layer(x)
 
         # forward the embeddings through the transformer
-        x, router_logits= self.backbone(x, x_cross, start_pos, inference)
+        x, router_probs= self.backbone(x, x_cross, inference, flash_attn)
 
         if self.is_causal or self.forecasting or self.mask_layer is not None:
             # full feature map (representing individual patch embeddings)
@@ -308,7 +312,7 @@ class TSFTransformer(nn.Module):
         if self.input_norm is not None and logits.ndim == ts.ndim:
             logits= self.input_norm(logits, 'denorm')
 
-        return logits, router_logits
+        return logits, router_probs
 
 
     def setup_optimizer(self, learning_rate, weight_decay, betas=(0.9, 0.95), verbose=False):
