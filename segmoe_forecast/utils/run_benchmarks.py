@@ -133,13 +133,14 @@ def build_parser():
                         help="Enable or disable saving training/validation plots")
     parser.add_argument("--plot-cut-first", action=argparse.BooleanOptionalAction, default=True,
                         help="Enable or disable first epoch results in plot files")
+    parser.add_argument("--seed", type=parse_value, default=None, help="Random number generator seed")
 
     return parser
 
 
 def count_parameters(model) -> None:
     total_params= sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f'Number of model parameters: {total_params}')
+    print(f'Number of model parameters: {total_params:,}')
 
 
 def setup_model_from_checkpoint(filename, checkpoint_dir, device, verbose=True):
@@ -275,6 +276,9 @@ def setup_trainer(
 
 def main(device, use_fused, use_flashattn):
     args= build_parser().parse_args()
+    if args.seed is not None:
+        torch.manual_seed(int(args.seed))
+
     verbose= args.verbose
     if verbose:
         print(f"[INFO] Device: {device}; Using fused AdamW: {use_fused}; FlashAttention available: {use_flashattn}")
