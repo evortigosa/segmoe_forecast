@@ -293,6 +293,8 @@ def main():
         ts_model, model_config= setup_model_from_checkpoint(check_file, check_dir, verbose)
     else:
         ts_model, model_config= setup_model(model_size, args)
+
+    ts_model= ts_model.to(device)
     if verbose:
         count_parameters(ts_model)
 
