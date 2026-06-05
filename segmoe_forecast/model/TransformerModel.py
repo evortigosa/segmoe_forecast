@@ -481,11 +481,11 @@ class TransformerBlock(nn.Module):
     through the setting of flash_attn in the forward method.
     """
 
-    def __init__(self, multi_modal, depth, d_model=384, block_size=512, n_heads=12, n_kv_heads=6,
-                 d_ff=768, dropout=0.2, drop_path=0.3, norm_type='rms', diff_attn=False,
-                 ffn_type='mlp', glu=False, n_experts=4, top_k_experts=1, experts_type='mlp',
-                 exp_route_dropout=0.1, bias=False, rope_theta=10000.0, use_qk_norm=False,
-                 headwise_attn_gate=False, c_att_mode='full', exp_segment_size=1) -> None:
+    def __init__(self, multi_modal, depth, d_model=384, block_size=512, n_heads=12, n_kv_heads=6, d_ff=768,
+                 dropout=0.2, drop_path=0.3, norm_type='rms', diff_attn=False, ffn_type='mlp', glu=False,
+                 n_experts=4, top_k_experts=1, experts_type='mlp', exp_route_dropout=0.1, exp_route_temperature=1.0,
+                 bias=False, rope_theta=10000.0, use_qk_norm=False, headwise_attn_gate=False, c_att_mode='full',
+                 exp_segment_size=1) -> None:
         super(TransformerBlock, self).__init__()
 
         # Self-Attention module to endogenous series
@@ -512,12 +512,12 @@ class TransformerBlock(nn.Module):
         if int(exp_segment_size) > 1:
             self.moeff= MoESegment(
                 d_model, d_ff, dropout, ffn_type, False, glu, n_experts, top_k_experts, experts_type,
-                exp_route_dropout, bias, exp_segment_size
+                exp_route_dropout, exp_route_temperature, bias, exp_segment_size
             )
         else:
             self.moeff= MoEFeedForward(
                 d_model, d_ff, dropout, ffn_type, False, glu, n_experts, top_k_experts, experts_type,
-                exp_route_dropout, bias
+                exp_route_dropout, exp_route_temperature, bias
             )
         self.drop_path3= DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
@@ -566,11 +566,11 @@ class TransformerModel(nn.Module):
     or 'dwconv' for DwConv-FFN. experts_type (str): multiple routed experts that can be 'mlp' for MLP-FFN.
     """
 
-    def __init__(self, multi_modal, is_causal, n_layer=8, d_model=384, block_size=512, n_heads=12,
-                 n_kv_heads=6, d_ff=768, dropout=0.2, drop_path=0.3, norm_type='rms', diff_attn=False,
-                 ffn_type='mlp', glu=False, n_experts=4, top_k_experts=1, experts_type='mlp',
-                 exp_route_dropout=0.1, bias=False, rope_theta=10000.0, use_qk_norm=False,
-                 headwise_attn_gate=False, c_att_mode='full', exp_segment_size=1) -> None:
+    def __init__(self, multi_modal, is_causal, n_layer=8, d_model=384, block_size=512, n_heads=12, n_kv_heads=6,
+                 d_ff=768, dropout=0.2, drop_path=0.3, norm_type='rms', diff_attn=False, ffn_type='mlp', glu=False,
+                 n_experts=4, top_k_experts=1, experts_type='mlp', exp_route_dropout=0.1, exp_route_temperature=1.0,
+                 bias=False, rope_theta=10000.0, use_qk_norm=False, headwise_attn_gate=False, c_att_mode='full',
+                 exp_segment_size=1) -> None:
         super(TransformerModel, self).__init__()
         # block_size represents the max sequence length
         self.block_size= block_size
@@ -598,10 +598,10 @@ class TransformerModel(nn.Module):
         # define a stack of TransformerBlocks
         self.transformer= nn.ModuleList([
             TransformerBlock(
-                multi_modal, depth, d_model, block_size, n_heads, n_kv_heads, d_ff, dropout,
-                sdp_rates[depth], norm_type, diff_attn, ffn_type, glu, n_experts, top_k_experts,
-                experts_type, exp_route_dropout, bias, rope_theta, use_qk_norm, headwise_attn_gate,
-                c_att_mode, exp_segment_size[depth]
+                multi_modal, depth, d_model, block_size, n_heads, n_kv_heads, d_ff, dropout, sdp_rates[depth],
+                norm_type, diff_attn, ffn_type, glu, n_experts, top_k_experts, experts_type, exp_route_dropout,
+                exp_route_temperature, bias, rope_theta, use_qk_norm, headwise_attn_gate, c_att_mode,
+                exp_segment_size[depth]
             ) for depth in range(n_layer)
         ])
         # final normalization layer after the last TransformerBlock

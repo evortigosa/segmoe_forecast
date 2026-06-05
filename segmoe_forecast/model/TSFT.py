@@ -24,13 +24,13 @@ from .Config import BaseConfig
 class TSFTransformer(nn.Module):
     """
     Initializes a Time-Series Forecasting Transformer (TSFT) model.
-    - width_factor controls the number of output forecast patches at each forward pass (when the
-    model (non-SSL Encoders) is trained to predict more or less than the next single patch).
+    - width_factor controls the number of output forecast patches at each forward pass (when the model
+    (non-SSL Encoders) is trained to predict more or less than the next single patch).
     - If is_causal=True, we have a Decoder Transformer forecaster; otherwise, an Encoder Transformer.
-    - If is_causal=False and mask_ratio > 0.0, applies patch masking for self-supervised (SSL)
-    training objective (Decoders are naturally trained in SSL mode by using causal masks).
-    - If is_causal=False, not SSL, and forecasting=True, we forecast future values; if is_causal=False,
-    not SSL, and forecasting=False, we perform time-series classification.
+    - If is_causal=False and mask_ratio > 0.0, applies patch masking for self-supervised (SSL) training
+    objective (Decoders are naturally trained in SSL mode by using causal masks).
+    - If is_causal=False, not SSL, and forecasting=True, we forecast future values; if is_causal=False, not SSL,
+    and forecasting=False, we perform time-series classification.
     - norm_type (str): 'layer' for LayerNorm, 'rms' for RMSNorm, or 'dyt' for DynamicTanh.
     - If diff_attn=True, we use differential attention.
     - ffn_type (str): 'mlp' for MLP-FFN, 'conv' for Conv-FFN, or 'dwconv' for DwConv-FFN.
@@ -41,11 +41,10 @@ class TSFTransformer(nn.Module):
     def __init__(
         self, patch_width:int, channels:int, n_outputs:int, width_factor:float,
         is_causal=False, forecasting=True, mask_ratio=0., n_layer=6, d_model=256, block_size=512,
-        n_heads=8, n_kv_heads=4, d_ff=512, dropout=0.2, drop_path=0.3, norm_type='rms', diff_attn=False,
-        ffn_type='mlp', glu=False, n_experts=8, top_k_experts=2, experts_type='mlp', exp_route_dropout=0.1,
-        output_head_type='mlp', fine_tune=True, unpatch='conv', bias=False, rope_theta=10000.0,
-        use_input_norm=True, emb_norm_type='layer', output_head_dropout=0., use_qk_norm=False, headwise_attn_gate=False,
-        exp_segment_size=1
+        n_heads=8, n_kv_heads=4, d_ff=512, dropout=0.2, drop_path=0.3, norm_type='rms', diff_attn=False, ffn_type='mlp',
+        glu=False, n_experts=8, top_k_experts=2, experts_type='mlp', exp_route_dropout=0.1, exp_route_temperature=1.0,
+        output_head_type='mlp', fine_tune=True, unpatch='conv', bias=False, rope_theta=10000.0, use_input_norm=True,
+        emb_norm_type='layer', output_head_dropout=0., use_qk_norm=False, headwise_attn_gate=False, exp_segment_size=1
     ) -> None:
         super(TSFTransformer, self).__init__()
         assert patch_width > 0, "patch_width must be greater than zero"
@@ -101,9 +100,9 @@ class TSFTransformer(nn.Module):
 
         # define the backbone transformer model
         self.backbone= TransformerModel(
-            multi_modal, is_causal, n_layer, d_model, patch_dim, n_heads, n_kv_heads, d_ff, dropout,
-            drop_path, norm_type, diff_attn, ffn_type, glu, n_experts, top_k_experts, experts_type,
-            exp_route_dropout, bias, rope_theta, use_qk_norm, headwise_attn_gate, c_att_mode, exp_segment_size
+            multi_modal, is_causal, n_layer, d_model, patch_dim, n_heads, n_kv_heads, d_ff, dropout, drop_path,
+            norm_type, diff_attn, ffn_type, glu, n_experts, top_k_experts, experts_type, exp_route_dropout,
+            exp_route_temperature, bias, rope_theta, use_qk_norm, headwise_attn_gate, c_att_mode, exp_segment_size
         )
 
         # identity transformation (no change to the tensor)
@@ -131,11 +130,11 @@ class TSFTransformer(nn.Module):
 
         self.config= BaseConfig(
             self.patch_width, channels, self.n_outputs, self.width_factor, 
-            self.is_causal, self.forecasting, mask_ratio, n_layer, d_model, self.block_size,
-            n_heads, n_kv_heads, d_ff, dropout, drop_path, norm_type, diff_attn, ffn_type, glu,
-            n_experts, top_k_experts, experts_type, exp_route_dropout, output_head_type, fine_tune,
-            unpatch, bias, rope_theta, use_input_norm, emb_norm_type, output_head_dropout, use_qk_norm,
-            headwise_attn_gate, exp_segment_size
+            self.is_causal, self.forecasting, mask_ratio, n_layer, d_model, self.block_size, n_heads,
+            n_kv_heads, d_ff, dropout, drop_path, norm_type, diff_attn, ffn_type, glu, n_experts, top_k_experts,
+            experts_type, exp_route_dropout, exp_route_temperature, output_head_type, fine_tune, unpatch, bias,
+            rope_theta, use_input_norm, emb_norm_type, output_head_dropout, use_qk_norm, headwise_attn_gate,
+            exp_segment_size
         )
 
 
@@ -199,7 +198,7 @@ class TSFTransformer(nn.Module):
             f_patch_width= int(width_factor * self.patch_width)  # patch_width for Decoders
             end_f_patch_width= 0
 
-            if forecast_cut > 0 and forecast_cut < f_patch_width:
+            if 0 < forecast_cut < f_patch_width:
                 # decrease the size of the generated tail (from prediction end)
                 end_f_patch_width= forecast_cut  # Encoders-only
             else:
@@ -214,10 +213,12 @@ class TSFTransformer(nn.Module):
 
 
     @torch.inference_mode()
-    def forecast(self, ts, ts_mark=None, ts_mark_future=None):
+    def forecast(self, ts, ts_mark=None, ts_mark_future=None, dynamic_window=True):
         """
-        Perform autoregressive forecasting patch-by-patch until get the forecast horizon.
-        - when n_outputs==1, we perform time-series forecasting/regression.
+        Perform autoregressive forecasting until get the forecast horizon.
+        - dynamic_window (bool) defines the windowing policy. Forecasted tokens are attached to ts and forwarded to the
+        next forecasting step; when dynamic_window=True, the oldest context is dropped only when ts exceeds block_size;
+        when dynamic_window=False, the oldest context is dropped every forecasting step to keep the window size fixed.
         """
         assert not isinstance(self.head, EncoderSSLHead), "Forecasting is not enabled for EncoderSSLHead"
         assert self.forecasting, "Forecasting is not enabled"
@@ -227,11 +228,11 @@ class TSFTransformer(nn.Module):
         end_f_patch_width= int(self.forecast_lst)
 
         f_step= f_patch_width - end_f_patch_width
-        assert f_step > 0, "f_step must be positive"
+        assert f_step > 0, "The forecast step must be positive"
         n_patches= math.ceil(self.n_outputs / f_step)
 
         B, C, T= ts.size()
-        assert T >= f_step, f"Initial sequence length {T} must be >= f_step {f_step}"
+        assert T >= f_step, f"Initial sequence length {T} must be >= forecast step {f_step}"
         round_t= int(n_patches * f_step)
         out= torch.zeros([B, C, round_t], device=ts.device, dtype=ts.dtype)
 
@@ -243,15 +244,23 @@ class TSFTransformer(nn.Module):
                     future= logits[:, :, -f_patch_width:-end_f_patch_width]
                 else:
                     future= logits[:, :, -f_patch_width:]  # get the last (newest) prediction
-                ts= ts[:, :, f_step:]                      # drop the oldest forecasting step
+
+                if not dynamic_window:
+                    ts= ts[:, :, f_step:]                  # drop the oldest forecasting step
                 ts= torch.cat((ts, future), dim=-1)        # append the new prediction
+                drop_old= ts.size(-1) - self.block_size
+                if dynamic_window and drop_old > 0:        # drop the oldest context only when ts exceeds block_size
+                    ts= ts[:, :, drop_old:]
 
                 if ts_mark is not None and ts_mark_future is not None:
-                    # we also have to slide the context, otherwise our time stamps will drift
-                    # out of alignment
+                    # we also have to slide the context, otherwise our time stamps will drift out of alignment
                     next_mark_future= ts_mark_future[:, :, i*f_step:(i+1)*f_step]
-                    ts_mark= ts_mark[:, :, f_step:]
+
+                    if not dynamic_window:
+                        ts_mark= ts_mark[:, :, f_step:]
                     ts_mark= torch.cat([ts_mark, next_mark_future], dim=-1)
+                    if dynamic_window and drop_old > 0:    # drop the oldest covariates only when ts_mark exceeds block_size
+                        ts_mark= ts_mark[:, :, drop_old:]
 
                 out[:, :, i*f_step:(i+1)*f_step]= future  # store the forecasting
 
