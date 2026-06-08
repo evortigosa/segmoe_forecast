@@ -53,7 +53,7 @@ class PositionalEmbedding(nn.Module):
 
 class PatchMasking(nn.Module):
     """
-    Applies random masking to the patch embeddings for self-supervised training tasks.
+    Applies random masking to the patch embeddings for self-supervised pretraining tasks.
     A specified fraction (mask_ratio) of patches is set to zero.
     """
 
@@ -68,6 +68,7 @@ class PatchMasking(nn.Module):
 
 
     def forward(self, x):
+        """ The masking mechanism is used only during self-supervised pretraining. """
         if (not self.training) or self.mask_ratio== 0.0:
             return x
 
