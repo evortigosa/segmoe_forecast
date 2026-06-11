@@ -44,7 +44,7 @@ print("device_count:", torch.cuda.device_count())
 print("====================\n")
 PY
 
-python -u -m segmoe_forecast.utils.run_benchmarks_cp --model-size base \
+python -u -m segmoe_forecast.utils.run_benchmarks --model-size base \
   --block-size 512 --patch-width 8 --width-factor 4 --channels 21 \
   --set exp_route_dropout=0. --set exp_route_temperature=1.0 \
   --exp-segment-size "[5,5,4,4,3,3]" \
