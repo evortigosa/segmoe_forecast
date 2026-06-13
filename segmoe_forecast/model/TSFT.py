@@ -57,11 +57,11 @@ class TSFTransformer(nn.Module):
             f"block_size ({self.block_size}) must be greater than or equal to patch_width ({self.patch_width})"
         # standardize text-based hyperparameters
         norm_type= norm_type.lower()
-        ffn_type= ffn_type.lower()
+        ffn_type= ffn_type.lower() if isinstance(ffn_type, str) else None
         experts_type= experts_type.lower()
         output_head_type= output_head_type.lower()
         unpatch= unpatch.lower()
-        emb_norm_type= emb_norm_type.lower() if isinstance(emb_norm_type, str) else emb_norm_type
+        emb_norm_type= emb_norm_type.lower() if isinstance(emb_norm_type, str) else None
         c_att_mode='full'
 
         self.n_outputs= int(n_outputs)

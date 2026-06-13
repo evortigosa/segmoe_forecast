@@ -219,9 +219,12 @@ class MoEFeedForward(nn.Module):
 
         # shared fallback expert -- ensures no token is unprocessed if its top-k experts happen
         # to be poorly trained or overflowed
-        self.shared_expert= get_ffn(ffn_type, d_model, d_ff, dropout, fan_gate, glu, bias)
+        self.shared_expert= (
+            get_ffn(ffn_type, d_model, d_ff, dropout, fan_gate, glu, bias) if ffn_type is not None else None
+        )
 
         if n_experts == 0:
+            assert self.shared_expert is not None, "ffn_type must be specified when n_experts is 0"
             self.experts= None
             self.top_k= 0
         else:
@@ -237,7 +240,7 @@ class MoEFeedForward(nn.Module):
                     "experts_type must be a string or a list of length n_experts"
 
             # controls contribution from fallback expert
-            self.shared_gating= nn.Linear(d_model, 1, bias=False)
+            self.shared_gating= nn.Linear(d_model, 1, bias=False) if self.shared_expert is not None else None
 
             # n_experts routed expert modules
             self.experts= nn.ModuleList([
@@ -251,7 +254,8 @@ class MoEFeedForward(nn.Module):
             self.router_temperature= max(exp_route_temperature, 1e-6)
 
             # initialize gating modules with Glorot / fan_avg
-            nn.init.xavier_uniform_(self.shared_gating.weight)
+            if self.shared_gating is not None:
+                nn.init.xavier_uniform_(self.shared_gating.weight)
             nn.init.xavier_uniform_(self.gating.weight)
 
 
@@ -291,9 +295,12 @@ class MoEFeedForward(nn.Module):
             current_expert= expert(expert_inputs) * routing_probs
             results.index_add_(0, token_idx, current_expert.to(x_squashed.dtype))
 
-        # shared fallback expert always applied
-        shared_out= self.shared_expert(x) * F.sigmoid(self.shared_gating(x))
-        results= results.view(B, T, C) + shared_out
+        if self.shared_expert is not None:
+            # shared fallback expert always applied
+            shared_out= self.shared_expert(x) * F.sigmoid(self.shared_gating(x))
+            results= results.view(B, T, C) + shared_out
+        else:
+            results= results.view(B, T, C)
 
         return results.contiguous()
 
@@ -320,9 +327,12 @@ class MoESegmentV0(nn.Module):
 
         # shared fallback expert -- ensures no segment is unprocessed if its top-k experts happen
         # to be poorly trained or overflowed
-        self.shared_expert= get_ffn(ffn_type, d_model, d_ff, dropout, fan_gate, glu, bias)
+        self.shared_expert= (
+            get_ffn(ffn_type, d_model, d_ff, dropout, fan_gate, glu, bias) if ffn_type is not None else None
+        )
 
         if n_experts == 0:
+            assert self.shared_expert is not None, "ffn_type must be specified when n_experts is 0"
             self.experts= None
             self.top_k= 0
         else:
@@ -344,7 +354,7 @@ class MoESegmentV0(nn.Module):
             self.in_proj= nn.Linear(d_model_seg, d_model, bias=bias) if self.segment_size > 1 else nn.Identity()
 
             # controls contribution from fallback expert
-            self.shared_gating= nn.Linear(d_model, 1, bias=False)
+            self.shared_gating= nn.Linear(d_model, 1, bias=False) if self.shared_expert is not None else None
 
             # n_experts routed expert modules -- if segment_size > 1, experts consume segments of
             # patches (token embeddings) to allow experts to learn within-segment interactions,
@@ -368,7 +378,8 @@ class MoESegmentV0(nn.Module):
                     if m.bias is not None: nn.init.zeros_(m.bias)
 
             # initialize gating modules with Glorot / fan_avg
-            nn.init.xavier_uniform_(self.shared_gating.weight)
+            if self.shared_gating is not None:
+                nn.init.xavier_uniform_(self.shared_gating.weight)
             nn.init.xavier_uniform_(self.gating.weight)
 
 
@@ -435,10 +446,12 @@ class MoESegmentV0(nn.Module):
 
         # reshape results_segments back into token sequence shape (B, Segs, C)
         results= results.contiguous().view(B, Segs, -1)
-        # shared fallback expert always applied (to segmented inputs to avoid architectural asymmetry)
-        shared_out= self.shared_expert(x_padded) * F.sigmoid(self.shared_gating(x_padded))
-
-        results= self.out_proj(results + shared_out)
+        if self.shared_expert is not None:
+            # shared fallback expert always applied (to segmented inputs to avoid architectural asymmetry)
+            shared_out= self.shared_expert(x_padded) * F.sigmoid(self.shared_gating(x_padded))
+            results= self.out_proj(results + shared_out)
+        else:
+            results= self.out_proj(results)
         results= results.contiguous().view(B, Tpad, -1)
 
         # ensure no contributions for padded tokens (mask-out)
@@ -471,7 +484,10 @@ class MoESegment(nn.Module):
         self.router_probs= None
 
         if n_experts == 0:
-            self.shared_expert= get_ffn(ffn_type, d_model, d_ff, dropout, fan_gate, glu, bias)
+            self.shared_expert= (
+                get_ffn(ffn_type, d_model, d_ff, dropout, fan_gate, glu, bias) if ffn_type is not None else None
+            )
+            assert self.shared_expert is not None, "ffn_type must be specified when n_experts is 0"
             self.experts= None
             self.top_k= 0
         else:
@@ -494,9 +510,11 @@ class MoESegment(nn.Module):
 
             # shared fallback expert -- ensures no segment is unprocessed if its top-k experts happen
             # to be poorly trained or overflowed
-            self.shared_expert= get_ffn(ffn_type, d_model_seg, d_ff_seg, dropout, fan_gate, glu, bias)
+            self.shared_expert= (
+                get_ffn(ffn_type, d_model_seg, d_ff_seg, dropout, fan_gate, glu, bias) if ffn_type is not None else None
+            )
             # controls contribution from fallback expert
-            self.shared_gating= nn.Linear(d_model_seg, 1, bias=False)
+            self.shared_gating= nn.Linear(d_model_seg, 1, bias=False) if self.shared_expert is not None else None
 
             # n_experts routed expert modules -- if segment_size > 1, experts consume segments of
             # size d_model * segment_size to allow experts to learn within-segment interactions,
@@ -516,7 +534,8 @@ class MoESegment(nn.Module):
             self.router_temperature= max(exp_route_temperature, 1e-6)
 
             # initialize gating modules with Glorot / fan_avg
-            nn.init.xavier_uniform_(self.shared_gating.weight)
+            if self.shared_gating is not None:
+                nn.init.xavier_uniform_(self.shared_gating.weight)
             nn.init.xavier_uniform_(self.gating.weight)
 
 
@@ -582,12 +601,12 @@ class MoESegment(nn.Module):
         # reshape results_segments back into token sequence shape (B, Tpad, C)
         results= results.contiguous().view(B, Tpad, C)
 
-        # shared fallback expert always applied (to segmented inputs to avoid architectural asymmetry)
-        flat_segments= x_padded.view(B, Segs, -1)  # (B, Segs, s * C)
-        shared_out= self.shared_expert(flat_segments) * F.sigmoid(self.shared_gating(flat_segments))
-        shared_out= shared_out.contiguous().view(B, Tpad, C)
-
-        results= results + shared_out
+        if self.shared_expert is not None:
+            # shared fallback expert always applied (to segmented inputs to avoid architectural asymmetry)
+            flat_segments= x_padded.view(B, Segs, -1)  # (B, Segs, s * C)
+            shared_out= self.shared_expert(flat_segments) * F.sigmoid(self.shared_gating(flat_segments))
+            shared_out= shared_out.contiguous().view(B, Tpad, C)
+            results= results + shared_out
 
         # ensure no contributions for padded tokens (mask-out)
         if remainder > 0:
