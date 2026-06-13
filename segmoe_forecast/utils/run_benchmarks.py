@@ -99,6 +99,8 @@ def build_parser():
     parser.add_argument("--setup-opt", action=argparse.BooleanOptionalAction, default=False,
                         help="Enable or disable model setup_optimizer on weight decayed parameters")
     parser.add_argument("--loss", type=str, default='huber', help="Loss criterion can be HuberLoss or MSELoss")
+    parser.add_argument("--huber-delta", type=float, default=2.0, help="HuberLoss delta")
+    parser.add_argument("--bloss-alpha", type=float, default=0.02, help="MoE LoadBalancingLoss alpha")
     parser.add_argument("--stop-patience", type=int, default=5, help="Number of patience epochs for early stopping")
     parser.add_argument("--stop-min",   type=float, default=1e-6, help="Min delta for early stopping")
     parser.add_argument("--clip-grad", type=parse_value, default=None,
@@ -219,14 +221,10 @@ def setup_data_loaders(
 
 def setup_trainer(
     model, device, use_fused, train_loader, val_loader, test_loader, scaler_obj,
-    checkpoint_dir, filename, epochs=10, max_lr=3.2e-3, min_lr=1.2e-4, warmup_portion=0.1, weight_decay=1e-1,
-    setup_optimizer=False, loss='huber', stop_patience=5, stop_min_delta=1e-6, verbose=True, disable_tqdm=True,
+    checkpoint_dir, filename, max_epochs=10, max_lr=3.2e-3, min_lr=1.2e-4, warmup_portion=0.1, weight_decay=1e-1,
+    setup_optimizer=False, loss='huber', huber_delta=2.0, bal_loss_alpha=0.02, stop_patience=5, stop_min_delta=1e-6,
+    verbose=True, disable_tqdm=True,
 ):
-    config= model.config
-    steps = len(train_loader) * epochs
-    warmup_steps= steps * warmup_portion
-    max_steps= steps
-
     if setup_optimizer:
         optimizer= model.setup_optimizer(
             learning_rate=max_lr, weight_decay=weight_decay, betas=(0.9, 0.95), verbose=verbose
@@ -236,17 +234,21 @@ def setup_trainer(
             model.parameters(), lr=max_lr, betas=(0.9, 0.95), weight_decay=weight_decay,
             eps=1e-10, fused=use_fused
         )
+
+    if loss.lower() == 'huber':
+        # See https://arxiv.org/abs/2409.16040
+        criterion= nn.HuberLoss(reduction='none', delta=huber_delta)
+    else:
+        criterion= nn.MSELoss(reduction='none')
+    aux_criterion= LoadBalancingLoss(model.config.n_experts, model.config.top_k_experts, alpha=bal_loss_alpha)
+
+    steps_per_epoch= len(train_loader)
+    max_steps= steps_per_epoch * max_epochs
+    warmup_steps= int(max_steps * warmup_portion)
     # for decreasing learning rate -- the CosineLRDecay is designed to be used per step
     scheduler= CosineLRDecay(optimizer, min_lr, max_lr, warmup_steps, max_steps)
     # terminate training when the validation loss (per epoch) does not improve
     early_stopping= EarlyStopping(patience=stop_patience, min_delta=stop_min_delta)
-
-    if loss.lower() == 'huber':
-        # See https://arxiv.org/abs/2409.16040
-        criterion= nn.HuberLoss(reduction='none', delta=2.0)
-    else:
-        criterion= nn.MSELoss(reduction='none')
-    aux_criterion= LoadBalancingLoss(config.n_experts, config.top_k_experts, alpha=0.02)
 
     trainer_obj= Trainer(
         model, device, train_loader, scaler_obj, val_loader, test_loader, criterion, optimizer,
@@ -321,7 +323,7 @@ def main():
     trainer= setup_trainer(
         ts_model, device, use_fused, enc_train_loader, enc_val_loader, test_loader_96, enc_tds_scaler,
         check_dir, check_file, epochs, args.max_lr, args.min_lr, args.warmup_portion, args.weight_decay, args.setup_opt,
-        args.loss, args.stop_patience, args.stop_min, verbose, disable_tqdm
+        args.loss, args.huber_delta, args.bloss_alpha, args.stop_patience, args.stop_min, verbose, disable_tqdm
     )
 
     if args.train:
