@@ -78,10 +78,45 @@ class Trainer:
                     state[key]= value.to(self.device)
 
 
+    def _set_loader(self, loader):
+        """ Helper. Just return loader. """
+        return loader
+
+
     def _move_to_device(self, x):
         """ Helper. Return a tensor on device. """
         if isinstance(x, torch.Tensor):
             return x.to(self.device)
+        return x
+
+
+    def _unwrap_model(self):
+        """ Helper to ensure compatibility with distributed training. """
+        return self.model
+
+
+    def _is_main_process(self) -> bool:
+        """ Helper to ensure compatibility with distributed training. """
+        return True
+
+
+    def _barrier(self):
+        """ Helper to ensure compatibility with distributed training. """
+        pass
+
+
+    def _print(self, *args, **kwargs):
+        """ Helper to ensure compatibility with distributed training. """
+        print(*args, **kwargs)
+
+
+    def _reduce_sum(self, x:torch.Tensor) -> torch.Tensor:
+        """ Helper to ensure compatibility with distributed training. """
+        return x
+
+
+    def _gather_variable_batch(self, x:torch.Tensor) -> torch.Tensor:
+        """ Helper to ensure compatibility with distributed training. """
         return x
 
 
@@ -93,6 +128,11 @@ class Trainer:
         loss.backward()
         if clip_grad is not None:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=clip_grad)
+
+
+    def _reduce_moe_metrics(self, metrics):
+        """ Helper to ensure compatibility with distributed training. """
+        return metrics
 
 
     def _save(self, state_file, state_path):
@@ -154,6 +194,9 @@ class Trainer:
         """
         Set a log entry. log_type can be "info", "warning", or "error".
         """
+        if not self._is_main_process():
+            return
+
         if log_type.lower() == "warning" or log_type.lower() == "error":
             self._log.warning(message)
             log_type= f"[{log_type.upper()}]"
@@ -196,6 +239,7 @@ class Trainer:
             torch.cuda.synchronize(self.device)
             peak_vram= torch.cuda.max_memory_allocated(self.device)/1024**3
             peak_vram= torch.tensor(peak_vram, device=self.device)
+            peak_vram= self._reduce_sum(peak_vram)
             return float(peak_vram.item())
 
         return 0.
@@ -240,21 +284,22 @@ class Trainer:
 
     def set_forecast_horizon(self, horizon:int):
         """ Helper to ensure a correct setting of n_outputs (forecast_horizon). """
-        if hasattr(self.model, "n_outputs"):
-            self.model.n_outputs= horizon
+        model= self._unwrap_model()
+        if hasattr(model, "n_outputs"):
+            model.n_outputs= horizon
 
 
     @torch.inference_mode()
     def test(self, test_loader=None, inverse_transform=False, dynamic_window=True):
         """
-        Test the model on a test set.
-        Returns the mean test loss, test predictions, and test labels.
+        Test the model on a test set. Safe for uneven last batches and correct under distributed sampler padding.
+        Returns test predictions and test labels.
         """
-        test_loader= self.test_loader if test_loader is None else test_loader
+        test_loader= self.test_loader if test_loader is None else self._set_loader(test_loader)
         assert test_loader is not None, "test_loader cannot refer to None"
         self.model.eval()
         # all logits and trues to feed external metrics
-        all_logits, all_trues= [], []
+        all_logits, all_trues, all_indices= [], [], []
 
         if self.train_ds_scaler is not None and inverse_transform:
             scale_= self._move_to_device(torch.from_numpy(self.train_ds_scaler.scale_).float().view(1, -1, 1))
@@ -265,16 +310,17 @@ class Trainer:
             mean_ = 0.0
 
         start= time.time()
-        p_bar= self.disable_tqdm
+        p_bar= self.disable_tqdm or not self._is_main_process()
         self._reset_cuda_memory_stats(empty_cache=True, reset_peak_memory=True)
+        model_ref= self._unwrap_model()
 
         for batch in tqdm(test_loader, desc='Testing', disable=p_bar):
             # --- minibatch construction ---
-            data, target, data_time, target_time, *_= self._get_minibatch(batch)
+            data, target, data_time, target_time, sample_index= self._get_minibatch(batch, return_index=True)
 
             # --- forward pass and get logits ---
-            if getattr(self.model, "forecasting", False):
-                logits= self.model.forecast(
+            if getattr(model_ref, "forecasting", False):
+                logits= model_ref.forecast(
                     data, ts_mark=data_time, ts_mark_future=target_time, dynamic_window=dynamic_window
                 )
                 if inverse_transform:
@@ -284,28 +330,51 @@ class Trainer:
             else:
                 logits, *_= self.model(data, ts_mark=data_time)
 
-            # --- register preds and trues ---
-            all_logits.append(logits.cpu())
-            all_trues.append(target.cpu())
+            logits_store= self._gather_variable_batch(logits.detach())
+            target_store= self._gather_variable_batch(target.detach())
+            index_store = self._gather_variable_batch(sample_index.detach().view(-1))
+            if self._is_main_process():
+                all_logits.append(logits_store.float().cpu())
+                all_trues.append(target_store.float().cpu())
+                all_indices.append(index_store.cpu())
 
         peak_vram= self._get_cuda_memory_stats()
         end= time.time()
         dt = self._format_dt(end - start)
         self._set_log("info", f"test | max GPU mem=%.2fGB | dt=%sms" % (peak_vram, dt),)
 
-        return torch.cat(all_logits, dim=0), torch.cat(all_trues, dim=0)
+        if not self._is_main_process():
+            return None, None
+        if len(all_logits) == 0:
+            raise RuntimeError("No predictions were collected during test().")
+
+        preds= torch.cat(all_logits, dim=0)
+        trues= torch.cat(all_trues, dim=0)
+        indices= torch.cat(all_indices, dim=0).long()
+        # gather sample indices too, then sort and deduplicate (may happen in distributed evaluations)
+        order= torch.argsort(indices)
+        indices= indices[order]
+        preds= preds[order]
+        trues= trues[order]
+        # deduplicate preds and trues
+        keep= torch.ones_like(indices, dtype=torch.bool)
+        keep[1:]= indices[1:] != indices[:-1]
+        preds= preds[keep]
+        trues= trues[keep]
+
+        return preds, trues
 
 
     @torch.inference_mode()
-    def validate(self, val_criterion=nn.MSELoss(reduction='none')):
+    def validate(self, val_criterion=None):
         """
         Validate the model on a validation set.
         """
         self.model.eval()
-        val_criterion= val_criterion if val_criterion is not None else self.criterion
+        val_criterion= val_criterion if val_criterion is not None else nn.MSELoss(reduction='none')
         val_loss= torch.tensor(0.0, device=self.device)
         n_samples= torch.tensor(0, device=self.device, dtype=torch.long)
-        p_bar= self.disable_tqdm
+        p_bar= self.disable_tqdm or not self._is_main_process()
 
         for batch in tqdm(self.val_loader, desc='Validating', disable=p_bar):
             # --- minibatch construction ---
@@ -319,20 +388,22 @@ class Trainer:
             val_loss += loss.detach() * data.size(0)
             n_samples+= data.size(0)
 
+        val_loss = self._reduce_sum(val_loss)
+        n_samples= self._reduce_sum(n_samples)
         val_loss= val_loss / n_samples.clamp_min(1)
 
         return float(val_loss.item())
 
 
     @torch.inference_mode()
-    def validate_bf16(self, val_criterion=nn.MSELoss(reduction='none')):
+    def validate_bf16(self, val_criterion=None):
         """
         Validate the model on a validation set using bfloat16.
         """
         assert self.device.type == 'cuda', "BF16 training requires CUDA"
 
         self.model.eval()
-        val_criterion= val_criterion if val_criterion is not None else self.criterion
+        val_criterion= val_criterion if val_criterion is not None else nn.MSELoss(reduction='none')
         val_loss= 0.0
         n_samples= 0
 
@@ -364,7 +435,7 @@ class Trainer:
         n_samples= torch.tensor(0, device=self.device, dtype=torch.long)
         n_steps= 0
         epoch_lr= 0.0
-        p_bar= self.disable_tqdm
+        p_bar= self.disable_tqdm or not self._is_main_process()
 
         # --- training steps ---
         for batch in tqdm(self.train_loader, desc=f"Training epoch {epoch}", disable=p_bar):
@@ -390,10 +461,14 @@ class Trainer:
                 loss= loss + aux_loss
 
                 if get_moe_metrics and (self.expert_traker is not None):
+                    global_metrics= self._reduce_moe_metrics(global_metrics)
+                    layer_metrics = self._reduce_moe_metrics(layer_metrics)
                     self.expert_traker.update(global_metrics, layer_metrics)
 
-            # check loss finite
-            if not torch.isfinite(loss).all():
+            # check loss finite -- collectively, so that under DDP every rank raises together
+            not_finite= (~torch.isfinite(loss).all()).to(torch.long)
+            not_finite= self._reduce_sum(not_finite)
+            if int(not_finite.item()) > 0:
                 self._set_log("error",
                     f"train_one_epoch | non_finite_loss | epoch=%d | loss=%s" % (epoch, str(loss.detach().cpu()))
                 )
@@ -405,18 +480,20 @@ class Trainer:
 
             # --- update the parameters using the gradient ---
             self.optimizer.step()
+            epoch_lr += self.optimizer.param_groups[0]['lr']
             # per-step scheduler
             if self.scheduler is not None:
                 self.scheduler.step()
 
-            epoch_lr += self.optimizer.param_groups[0]['lr']
             n_steps += 1
 
         if self.augmentation is not None:
             self.augmentation.step_epoch()
 
+        train_loss= self._reduce_sum(train_loss)
+        n_samples = self._reduce_sum(n_samples)
         train_loss= train_loss / n_samples.clamp_min(1)
-        epoch_lr  = epoch_lr / n_steps
+        epoch_lr  = epoch_lr / max(n_steps, 1)
 
         return float(train_loss.item()), epoch_lr
 
@@ -476,17 +553,17 @@ class Trainer:
 
             # --- update the parameters using the gradient ---
             self.optimizer.step()
+            epoch_lr += self.optimizer.param_groups[0]['lr']
             # per-step scheduler
             if self.scheduler is not None:
                 self.scheduler.step()
 
-            epoch_lr += self.optimizer.param_groups[0]['lr']
             n_steps += 1
 
         if self.augmentation is not None:
             self.augmentation.step_epoch()
 
-        train_loss= train_loss / n_samples
+        train_loss= train_loss / max(n_samples, 1)
         epoch_lr  = epoch_lr / max(n_steps, 1)
 
         return train_loss, epoch_lr
@@ -499,7 +576,7 @@ class Trainer:
         train_info= f'use_bf16={use_bf16}, clip_grad={clip_grad}, get_moe_metrics={get_moe_metrics}'
         opt_info  = f'weight_decay={self.optimizer.param_groups[0]["weight_decay"]:.2e}, betas={self.optimizer.param_groups[0]["betas"]}'
         scheduler_info= self.scheduler.extra_repr() if self.scheduler is not None else "N/A"
-        m_config= getattr(self.model, "config", None)
+        m_config= getattr(self._unwrap_model(), "config", None)
         model_info= f'model full config: {m_config}'
         self._set_log("info", f"train | {train_info} | optimizer info: {opt_info} | scheduler info: {scheduler_info} | {model_info}")
 
@@ -538,7 +615,9 @@ class Trainer:
                 did_validation= True
             else:
                 did_validation= False
-            self.val_losses.append(val_loss)
+            # keep val_losses aligned 1:1 with train_losses (for plotting). On epochs without a validation pass,
+            # append a NaN sentinel, so the curve gaps truthfully and downstream stats are not polluted
+            self.val_losses.append(val_loss if did_validation else float('nan'))
 
             if self.expert_traker is not None:
                 self.expert_traker.finalize_epoch()
@@ -546,7 +625,7 @@ class Trainer:
             peak_vram= self._get_cuda_memory_stats()
             end= time.time()
             dt = self._format_dt(end - start)
-            val_loss_log= f'{val_loss:.6f}' if did_validation else 'N/A'  # did_validation is False
+            val_loss_log= f'{val_loss:.6f}' if did_validation else 'N/A'
             self._set_log("info",
                 f"train | epoch=%d/%d | train_loss=%.6f | val_loss=%s | lr=%.4e | max GPU mem=%.2fGB | dt=%sms" % \
                 (epoch+1, epochs, train_loss, val_loss_log, epoch_lr, peak_vram, dt)
@@ -561,12 +640,11 @@ class Trainer:
                         self.save_checkpoint(epoch, best_val_loss)
 
                 if self.early_stopping is not None:
-                    # Watches validation MSE and halts training if it hasn't improved
-                    avg_val_loss= float(np.mean(self.val_losses))
-                    if self.early_stopping(avg_val_loss, epoch+1):
+                    # watches the current validation loss and halts if it hasn't improved within patience
+                    if self.early_stopping(val_loss, epoch+1):
                         self._set_log(
-                            "warning", f"train | early_stopping_triggered | epoch=%d | avg_val_loss=%.6f" % \
-                            (epoch+1, avg_val_loss)
+                            "warning", f"train | early_stopping_triggered | epoch=%d | val_loss=%.6f" % \
+                            (epoch+1, val_loss)
                         )
                         break
 
@@ -585,10 +663,11 @@ class Trainer:
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         checkpoint_path= self.get_checkpoint_path(f'{self.filename}.pth', self.checkpoint_dir)
         # construct checkpoint dictionary
+        model= self._unwrap_model()
         checkpoint= {
             'epoch': epoch,
-            'model_state_dict': self.model.state_dict(),
-            'config': asdict(self.model.config),
+            'model_state_dict': model.state_dict(),
+            'config': asdict(model.config),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'best_val_loss': best_val_loss,
             'train_losses': self.train_losses,
@@ -601,7 +680,7 @@ class Trainer:
             # (optional) save full expert tracker history in a separate file
             if self.expert_traker is not None:
                 traker_path= self.get_checkpoint_path(f'{self.filename}_expert_traker.pt', self.checkpoint_dir)
-                self._save(self.expert_traker.state_dict(), traker_path)
+                self._save(self.expert_traker.state_dict(compact=True), traker_path)
             self._set_log(
                 "info", f"save_checkpoint | epoch=%d | best_val_loss=%.6f | saved at %s" % \
                  (epoch+1, best_val_loss, checkpoint_path)
@@ -643,7 +722,8 @@ class Trainer:
         try:
             checkpoint= self._load(checkpoint_path, map_location='cpu', weights_only=True)
             # restore model state into the real underlying module
-            self.model.load_state_dict(self._strip_module_prefix(checkpoint['model_state_dict']))
+            model= self._unwrap_model()
+            model.load_state_dict(self._strip_module_prefix(checkpoint['model_state_dict']))
             # ensure model on target device
             self._set_model()
             # restore optimizer state
@@ -681,7 +761,7 @@ class Trainer:
                 if os.path.exists(traker_path) or tracker is not None:
                     if os.path.exists(traker_path):
                         tracker= self._load(traker_path, map_location="cpu", weights_only=True)
-                    m_config= getattr(self.model, "config", None)
+                    m_config= getattr(model, "config", None)
                     if m_config is None:
                         self._set_log("warning",
                             "load_checkpoint | Cannot restore expert_traker because model.config is missing."
@@ -692,6 +772,7 @@ class Trainer:
                 else:
                     self._set_log("warning", "load_checkpoint | No MoE usage history to load: skipping expert_traker restore.")
 
+            self._barrier()
             self._set_log("info",
                 "load_checkpoint | Checkpoint loaded from '%s'. Resuming training on '%s' with best validation loss of %.6f." % \
                 (checkpoint_path, _time, best_val_loss)
@@ -779,7 +860,12 @@ class Trainer:
         plt.figure(figsize=(14, 5))
         plt.subplot(1, 2, 1)
         plt.plot(epochs, train_losses, label='Train Loss', marker='o', linestyle='-')
-        plt.plot(epochs, val_losses, label='Validation Loss', marker='o', linestyle='-')
+        # validation loss may contain NaN sentinels on epochs without a validation pass. Plot only the evaluated
+        # epochs so the curve connects across the gaps instead of breaking the line at every NaN
+        epochs_arr= np.asarray(list(epochs), dtype=float)
+        val_arr= np.asarray(val_losses, dtype=float)
+        val_finite= np.isfinite(val_arr)
+        plt.plot(epochs_arr[val_finite], val_arr[val_finite], label='Validation Loss', marker='o', linestyle='-')
         plt.title('Training and Validation Loss')
         plt.xlabel('Epochs')
         plt.ylabel('Loss')
