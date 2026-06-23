@@ -6,10 +6,12 @@ Segment-wise MoE Forecasting Benchmark using ETT, Weather, ECL, and Traffic data
 import argparse
 import ast
 import inspect
+import random
+import numpy as np
 import torch
 import torch.nn as nn
-
 from dataclasses import fields, replace
+
 from segmoe_forecast.model import TSFTransformer
 from segmoe_forecast.model.Config import TinyConfig, SmallConfig, BaseConfig
 from segmoe_forecast.data_provider.loaders import get_ett_data_loaders, get_custom_data_loaders
@@ -68,10 +70,12 @@ def build_parser():
                         help="Enable or disable text infos")
     # model
     parser.add_argument("--model-size",  type=parse_value, default='small', help="Type of model configuration")
-    parser.add_argument("--block-size",  type=int, default=512, help="Input sequence length / context window")
-    parser.add_argument("--patch-width", type=int, default=8, help="Patch width")
-    parser.add_argument("--width-factor",type=float, default=4, help="Output patch width")
-    parser.add_argument("--n-outputs",   type=int, default=96, help="Prediction horizon / number of outputs")
+    # geometry args default to None: when omitted, the chosen --model-size preset keeps its own value
+    # (argparse can't tell a default from a user value, so None is the sentinel for 'not provided').
+    parser.add_argument("--block-size",  type=int, default=None, help="Input sequence length / context window (preset default if unset)")
+    parser.add_argument("--patch-width", type=int, default=None, help="Patch width (preset default if unset)")
+    parser.add_argument("--width-factor",type=float, default=None, help="Output horizon as a multiple of patch_width (preset default if unset)")
+    parser.add_argument("--n-outputs",   type=int, default=None, help="Prediction horizon / number of outputs (preset default if unset)")
     parser.add_argument("--channels",    type=int, default=7, help="Number of input channels")
     parser.add_argument(
         "--exp-segment-size", type=parse_value, default="[3,5,5,5]",
@@ -129,6 +133,12 @@ def count_parameters(model) -> None:
     print(f'Number of model parameters: {total_params:,}')
 
 
+def seed_everything(seed:int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+
 def setup_model_from_checkpoint(filename, checkpoint_dir, verbose=True):
     trainer= Trainer(
         model=None, device="cpu", train_loader=None, train_ds_scaler=None, val_loader=None, test_loader=None,
@@ -150,13 +160,20 @@ def setup_model(model_size, args):
 
     # explicit arguments that should always override preset defaults
     explicit_overrides= {
-        "patch_width": args.patch_width,
         "channels": args.channels,
-        "n_outputs": args.n_outputs,
-        "width_factor": args.width_factor,
-        "block_size": args.block_size,
         "exp_segment_size": args.exp_segment_size,
     }
+    # geometry knobs are preset-defined and differ across sizes (e.g. patch_width/width_factor), so only
+    # override them when the user actually passed them on the CLI (None == not provided). This approach
+    # keeps e.g. '--model-size base' at BaseConfig's geometry instead of inheriting CLI defaults
+    for _key, _val in (
+        ("patch_width", args.patch_width),
+        ("width_factor", args.width_factor),
+        ("block_size", args.block_size),
+        ("n_outputs", args.n_outputs),
+    ):
+        if _val is not None:
+            explicit_overrides[_key]= _val
     # generic overrides take final precedence
     overrides= {**explicit_overrides, **cli_overrides}
 
@@ -167,7 +184,6 @@ def setup_model(model_size, args):
         raise ValueError(f"Unknown config field(s) for {config_cls.__name__}: {sorted(unknown)}")
     # apply overrides
     config= replace(config, **overrides)
-
     model= TSFTransformer.from_config(config)
 
     return model, model.config
@@ -280,7 +296,7 @@ def main():
         use_flashattn= torch.backends.cuda.flash_sdp_enabled()
 
     if args.seed is not None:
-        torch.manual_seed(int(args.seed))
+        seed_everything(int(args.seed))
 
     verbose= args.verbose
     if verbose:
