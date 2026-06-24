@@ -54,10 +54,13 @@ class PositionalEmbedding(nn.Module):
 class PatchMasking(nn.Module):
     """
     Applies random masking to the patch embeddings for self-supervised pretraining tasks.
-    A specified fraction (mask_ratio) of patches is set to zero.
+    A specified fraction (mask_ratio) of patches is set to zero. PatchMasking masks patches by zeroing
+    them in place.
+    being dropped, so the sequence length is unchanged.
+    - If has_cls_tk=True, the class token (first token) is not masked.
     """
 
-    def __init__(self, mask_ratio=0.2) -> None:
+    def __init__(self, mask_ratio=0.75) -> None:
         super(PatchMasking, self).__init__()
         assert 0.0 <= mask_ratio < 1.0, "mask_ratio must be in [0, 1)"
         self.mask_ratio= mask_ratio
@@ -69,16 +72,35 @@ class PatchMasking(nn.Module):
 
     def forward(self, x):
         """ The masking mechanism is used only during self-supervised pretraining. """
-        if (not self.training) or self.mask_ratio== 0.0:
+        # ---- fast path: nothing to mask (fine-tuning / inference) ----
+        if self.mask_ratio == 0.:
             return x
 
+        # ---- general path: fixed-count random patch masking ----
+        cls= None
+        if self.has_cls_tk:
+            # ensure the class token will not be masked
+            cls= x[:, :1, :]
+            x  = x[:, 1:, :]
+
         B, P, C= x.size()  # (batch_size, num_patches, d_model)
-        # create a binary mask of shape (B, P): True means the patch is masked
-        mask= torch.rand(B, P, dtype=x.dtype, device=x.device) < self.mask_ratio
+        # the masked subset is chosen uniformly at random per sample via a random shuffle of patch indices
+        pto_keep= int(P * (1 - self.mask_ratio))
+        ids_shuffle= torch.rand(B, P, dtype=x.dtype, device=x.device).argsort(dim=1)
+        ids_restore= torch.argsort(ids_shuffle, dim=1)
+        # binary mask in shuffled order (1=mask, 0=keep): first pto_keep are kept, then unshuffle
+        mask= torch.ones(B, P, dtype=x.dtype, device=x.device)
+        mask[:, :pto_keep]= 0
+        mask= torch.gather(mask, dim=1, index=ids_restore).bool()  # (B, P): exactly P-pto_keep True/row
         # expand mask to match x dimensions (B, P, 1)
         mask= mask.unsqueeze(-1)
 
-        return x.masked_fill(mask, value=0.0)  # set masked positions to zero
+        # set masked positions to zero
+        x= x.masked_fill(mask, value=0.0)
+        if cls is not None:
+            x= torch.cat((cls, x), dim=1)
+
+        return x
 
 
 
