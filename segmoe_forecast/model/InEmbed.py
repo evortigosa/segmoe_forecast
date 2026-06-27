@@ -77,16 +77,10 @@ class PatchMasking(nn.Module):
             return x
 
         # ---- general path: fixed-count random patch masking ----
-        cls= None
-        if self.has_cls_tk:
-            # ensure the class token will not be masked
-            cls= x[:, :1, :]
-            x  = x[:, 1:, :]
-
         B, P, C= x.size()  # (batch_size, num_patches, d_model)
         # the masked subset is chosen uniformly at random per sample via a random shuffle of patch indices
-        pto_keep= int(P * (1 - self.mask_ratio))
-        ids_shuffle= torch.rand(B, P, dtype=x.dtype, device=x.device).argsort(dim=1)
+        pto_keep= max(1, int(P * (1 - self.mask_ratio)))  # guards extreme pto_keep=0
+        ids_shuffle= torch.rand(B, P, device=x.device).argsort(dim=1)  # float32 noise
         ids_restore= torch.argsort(ids_shuffle, dim=1)
         # binary mask in shuffled order (1=mask, 0=keep): first pto_keep are kept, then unshuffle
         mask= torch.ones(B, P, dtype=x.dtype, device=x.device)
@@ -94,11 +88,8 @@ class PatchMasking(nn.Module):
         mask= torch.gather(mask, dim=1, index=ids_restore).bool()  # (B, P): exactly P-pto_keep True/row
         # expand mask to match x dimensions (B, P, 1)
         mask= mask.unsqueeze(-1)
-
         # set masked positions to zero
         x= x.masked_fill(mask, value=0.0)
-        if cls is not None:
-            x= torch.cat((cls, x), dim=1)
 
         return x
 
