@@ -3,10 +3,10 @@
 This repo is the official implementation for the paper: [Seg-MoE: Multi-Resolution Segment-wise Mixture-of-Experts for Time Series Forecasting Transformers](https://arxiv.org/abs/2601.21641).
 
 ## Introduction
-We introduce Seg-MoE, a sparse MoE design that routes and processes contiguous time-step segments rather than making independent expert decisions. Token segments allow each expert to model intra-segment interactions directly, naturally aligning with inherent temporal patterns. We integrate Seg-MoE layers into a time-series Transformer and evaluate it on multiple multivariate long-term forecasting benchmarks. Seg-MoE consistently achieves state-of-the-art forecasting accuracy across almost all prediction horizons, outperforming both dense Transformers and prior token-wise MoE models.
+We introduce Seg-MoE, a sparse Mixture-of-Experts (MoE) design for time-series forecasting that routes contiguous time-step segments as units instead of routing each token independently. Existing MoE forecasters inherit token-wise routing from language models, where consecutive observations that jointly encode a local trend or seasonal event can be split across different experts, preventing any single expert from handling that pattern coherently. Seg-MoE instead operates temporally coherent conditional computation by routing contiguous segments, so temporally adjacent patches are sent to the same expert. We integrate Seg-MoE layers into a time-series Transformer and evaluate it on multiple multivariate long-term forecasting benchmarks. Seg-MoE consistently achieves state-of-the-art forecasting accuracy across almost all prediction horizons, outperforming both dense Transformers and prior token-wise MoE models.
 
 ## Overall Architecture
-Mixture-of-Experts (MoE) designs for sparse conditional computation in Transformer blocks. (a) Standard token-wise MoE: a router computes token-to-expert affinities and selects Top-K routed experts from N experts; the layer output is the weighted sum of the selected expert outputs. (b) Seg-MoE: routing is performed at the segment level, and the output combines Top-K routed experts with an always-active shared expert, providing a stable, dense pathway while preserving sparsity in the routed experts.
+Mixture-of-Experts (MoE) layers introduce sparse conditional computation into Transformer blocks by replacing the dense feed-forward network with a set of expert networks, only a few of which are activated per input. (a) Standard token-wise MoE: a router computes token-to-expert affinities and selects Top-K routed experts from N experts; the layer output is the weighted sum of the selected expert outputs. (b) Seg-MoE: routing is performed at the segment level, so every patch in a segment is handled by the same Top-K experts. The layer output combines the selected routed experts with an always-active shared expert, providing a stable pathway while preserving sparsity in the routed experts.
 
 <p align="center">
 <img src=".\figures\segmoe_architecture.png" width="900" height="" alt="" align=center />
@@ -17,7 +17,7 @@ Mixture-of-Experts (MoE) designs for sparse conditional computation in Transform
 - Pre-training on large-scale heterogeneous time series datasets
 
 ## Usage
-1. Install Python 3.12+, and then install the dependencies:
+1. Install Python 3.10+, and then install the dependencies:
 
 ```
 pip install -r requirements.txt
