@@ -272,8 +272,13 @@ class MoEFeedForward(nn.Module):
         self.router_probs= self.router_dropout(F.softmax(router_logits.float() / self.router_temperature, dim=-1))
         # select top-k experts for each token (softmax scores and indices) -> (B * T, K)
         router, selected_experts= torch.topk(self.router_probs, self.top_k, dim=-1)
-        # renormalize over top-k so they sum to 1 -- keeps MoE as a convex mixture
-        router= router / router.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+        if self.top_k > 1:
+            # renormalize over top-k so they sum to 1 -- keeps the MoE a convex mixture.
+            router= router / router.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+            # NOTE: at top_k == 1 this normalization would collapse the weight to a constant 1.0, whose gradient 
+            # w.r.t. the router logits is exactly 0, so the task loss could not reach the router (it would only 
+            # learn from the aux load-balancing loss). We therefore keep the raw selected softmax probability at
+            # top_k == 1 so the router still receives task-loss gradient and can learn token-to-expert assignments
         # cast back to x dtype
         router= router.to(x.dtype)
 
@@ -306,7 +311,166 @@ class MoEFeedForward(nn.Module):
 
 
 
-class MoESegmentV0(nn.Module):
+        class MoESegmentV0(nn.Module):
+            """
+            The Sparse Mixture of Experts (MoE) module for token-segments. Delegate the modeling of diverse time series
+            patterns to sparse specialized experts in a data-driven manner through a sparce gating function (only K of N
+            experts per segment of tokens) for expert assignments.
+            - When n_experts=0, forward the input into a single FFN module; MoE otherwise.
+            - exp_segment_size: number of contiguous tokens contained in a token-segment (non-overlapping) to feed the
+            routed experts (enable within-segment interactions learning). When exp_segment_size=1, each routed expert
+            consumes individual token embeddings (standard MoE).
+
+            Routing is performed once per segment, and each routed expert processes the whole segment jointly, so the
+            expert can learn cross-token (intra-segment) nonlinear combinations. An always-active shared expert provides
+            a stable dense pathway. Routing granularity and expert computation are therefore both segment-level.
+            """
+
+            def __init__(self, d_model, d_ff, dropout=0.2, ffn_type='mlp', fan_gate=False, glu=False, n_experts=4, 
+                         top_k=1, experts_type='mlp', exp_route_dropout=0.1, exp_route_temperature=1.0, bias=False, 
+                         exp_segment_size=1) -> None:
+                super(MoESegmentV0, self).__init__()
+                assert n_experts >= 0, "n_experts must be non-negative"
+                # store router probabilities for auxiliary load-balancing regularizers (losses)
+                self.router_probs= None
+
+                if n_experts == 0:
+                    self.shared_expert= (
+                        get_ffn(ffn_type, d_model, d_ff, dropout, fan_gate, glu, bias) if ffn_type is not None else None
+                    )
+                    assert self.shared_expert is not None, "ffn_type must be specified when n_experts is 0"
+                    self.experts= None
+                    self.top_k= 0
+                else:
+                    assert top_k > 0, "top_k must be > 0"
+                    self.top_k= min(top_k, n_experts)
+                    self.segment_size= int(exp_segment_size)
+                    assert self.segment_size > 0, "exp_segment_size must be > 0"
+
+                    if isinstance(experts_type, str):
+                        experts_type= [experts_type for _ in range(n_experts)]
+                    else:
+                        assert all(isinstance(item, str) for item in experts_type), \
+                            "experts_type must be a list of strings"
+                        assert len(experts_type) >= n_experts, \
+                            "experts_type must be a string or a list of length n_experts"
+
+                    # per-segment dims: a segment is the concatenation of segment_size token embeddings
+                    d_model_seg= d_model * self.segment_size
+                    d_ff_seg= d_ff * self.segment_size
+
+                    # shared fallback expert -- ensures no segment is unprocessed if its top-k experts happen
+                    # to be poorly trained or overflowed. Operates on the full segment vector (segment-wise).
+                    self.shared_expert= (
+                        get_ffn(ffn_type, d_model_seg, d_ff_seg, dropout, fan_gate, glu, bias) if ffn_type is not None else None
+                    )
+                    # controls contribution from fallback expert
+                    self.shared_gating= nn.Linear(d_model_seg, 1, bias=False) if self.shared_expert is not None else None
+
+                    # routed experts now operate on the FULL segment vector of width
+                    # d_model_seg = d_model * segment_size, with hidden width d_ff_seg = d_ff * segment_size.
+                    # The expert's first projection Linear(d_model_seg, d_ff_seg) mixes ALL tokens in the segment, 
+                    # so each routed expert models intra-segment interactions (cross-token nonlinear combinations)
+                    #
+                    # NOTE: this scales each routed expert's parameter/FLOP count
+                    self.experts= nn.ModuleList([
+                        get_expert_ffn(experts_type[i], d_model_seg, d_ff_seg, dropout, fan_gate, glu, bias)
+                        for i in range(n_experts)
+                    ])
+                    # experts router to generate segment-pooled affinity scores (one decision per segment)
+                    self.gating= nn.Linear(d_model_seg, n_experts, bias=False)
+                    # router regularization
+                    self.router_dropout= nn.Dropout(p=exp_route_dropout)
+                    self.router_temperature= max(exp_route_temperature, 1e-6)
+
+                    # initialize gating modules with Glorot / fan_avg
+                    if self.shared_gating is not None:
+                        nn.init.xavier_uniform_(self.shared_gating.weight)
+                    nn.init.xavier_uniform_(self.gating.weight)
+
+
+            def forward(self, x):
+                B, T, C= x.size()
+                # no sparse routed experts
+                if self.experts is None:
+                    return self.shared_expert(x)
+
+                # form non-overlapping segments: the sequence is right-padded with zeros if needed and a
+                # mask is used so padding does not contribute to outputs
+                s= self.segment_size
+                # pad sequence to multiple of s
+                remainder= T % s
+                if remainder > 0:
+                    pad_len   = s - remainder
+                    x_padded  = torch.cat([x, x.new_zeros((B, pad_len, C))], dim=1)  # (B, T + pad_len, C)
+                    valid_mask= torch.cat([
+                        x.new_ones((B, T), dtype=torch.bool), x.new_zeros((B, pad_len), dtype=torch.bool)
+                    ], dim=1)
+                else:
+                    x_padded  = x
+                    valid_mask= x.new_ones((B, T), dtype=torch.bool)
+
+                Tpad= x_padded.size(1)
+                Segs= Tpad // s  # number of segments per batch element
+                # reshape into segments: (B, Segs, s, C)
+                x_padded= x_padded.contiguous().view(B, Segs, s, C)
+                # flatten batch and segments to single dimension
+                flat_segments= x_padded.view(-1, s * C)  # (B * Segs, s * C)
+
+                # compute router logits and probabilities via softmax on segment-pooled vectors
+                router_logits= self.gating(flat_segments)  # (B * Segs, n_experts)
+                self.router_probs= self.router_dropout(F.softmax(router_logits.float() / self.router_temperature, dim=-1))
+                # select top-k experts for each segment (softmax scores and indices) -> (B * Segs, K)
+                router, selected_experts= torch.topk(self.router_probs, self.top_k, dim=-1)
+                if self.top_k > 1:
+                    # renormalize over top-k so they sum to 1 -- keeps the MoE a convex mixture.
+                    router= router / router.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+                # else: keep raw gate prob so the router gets task-loss gradient
+                # cast back to x dtype
+                router= router.to(x.dtype)
+
+                # output buffer
+                results= torch.zeros_like(flat_segments)
+                # one hot the selected experts -- (B * Segs, K, n_experts) -> (n_experts, K, B * Segs)
+                expert_mask= F.one_hot(
+                    selected_experts, num_classes=len(self.experts)
+                ).permute(2, 1, 0).to(device=x.device, dtype=torch.long)
+
+                for expert_idx, expert in enumerate(self.experts):
+                    # expert_mask[i] tells us which (rank, token segment) pairs route to expert i
+                    # retrieve pairs where this expert is selected
+                    rank_idx, segment_idx= torch.where(expert_mask[expert_idx])  # (K, B * Segs)
+                    if segment_idx.numel() == 0:
+                        continue
+                    # index the correct inputs and compute the expert output for the current expert
+                    # gather full token-segment vectors (s*C), not individual tokens or whole sequences
+                    expert_inputs= flat_segments.index_select(0, segment_idx)              # (n_sel, s*C)
+                    routing_probs= (router[segment_idx, rank_idx].unsqueeze(-1)).to(expert_inputs.dtype)
+                    # apply expert and routing probs by router and scatter-add to results
+                    current_expert= expert(expert_inputs) * routing_probs                  # (n_sel, s*C)
+                    results.index_add_(0, segment_idx, current_expert.to(flat_segments.dtype))
+
+                # reshape results_segments back into token sequence shape (B, Tpad, C)
+                results= results.contiguous().view(B, Tpad, C)
+
+                if self.shared_expert is not None:
+                    # shared fallback expert always applied (to segmented inputs to avoid architectural asymmetry)
+                    flat_segments= x_padded.view(B, Segs, -1)  # (B, Segs, s * C)
+                    shared_out= self.shared_expert(flat_segments) * F.sigmoid(self.shared_gating(flat_segments))
+                    shared_out= shared_out.contiguous().view(B, Tpad, C)
+                    results= results + shared_out
+
+                # ensure no contributions for padded tokens (mask-out, then drop the padding tail)
+                if remainder > 0:
+                    mask= valid_mask.unsqueeze(-1)  # (B, Tpad, 1)
+                    results= results * mask.to(results.dtype)
+                    results= results[:, :T, :]  # remove any padding
+
+                return results
+
+
+
+class MoESegmentV1(nn.Module):
     """
     The Sparse Mixture of Experts (MoE) module for token-segments. Delegate the modeling of diverse time series
     patterns to sparse specialized experts in a data-driven manner through a sparce gating function (only K of N
@@ -317,10 +481,10 @@ class MoESegmentV0(nn.Module):
     consumes individual token embeddings (standard MoE).
     """
 
-    def __init__(self, d_model, d_ff, dropout=0.2, ffn_type='mlp', fan_gate=False, glu=False,
-                 n_experts=4, top_k=1, experts_type='mlp', exp_route_dropout=0.1, exp_route_temperature=1.0,
-                 bias=False, exp_segment_size=1) -> None:
-        super(MoESegmentV0, self).__init__()
+    def __init__(self, d_model, d_ff, dropout=0.2, ffn_type='mlp', fan_gate=False, glu=False, n_experts=4, 
+                 top_k=1, experts_type='mlp', exp_route_dropout=0.1, exp_route_temperature=1.0, bias=False, 
+                 exp_segment_size=1) -> None:
+        super(MoESegmentV1, self).__init__()
         assert n_experts >= 0, "n_experts must be non-negative"
         # store router probabilities for auxiliary load-balancing regularizers (losses)
         self.router_probs= None
@@ -417,8 +581,10 @@ class MoESegmentV0(nn.Module):
         self.router_probs= self.router_dropout(F.softmax(router_logits.float() / self.router_temperature, dim=-1))
         # select top-k experts for each token (softmax scores and indices) -> (B * Segs, K)
         router, selected_experts= torch.topk(self.router_probs, self.top_k, dim=-1)
-        # renormalize over top-k so they sum to 1 -- keeps MoE as a convex mixture
-        router= router / router.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+        if self.top_k > 1:
+            # renormalize over top-k so they sum to 1 -- keeps the MoE a convex mixture.
+            router= router / router.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+        # else: keep raw gate prob so the router gets task-loss gradient
         # cast back to x dtype
         router= router.to(x.dtype)
 
@@ -473,11 +639,15 @@ class MoESegment(nn.Module):
     - exp_segment_size: number of contiguous tokens contained in a token-segment (non-overlapping) to feed the
     routed experts (enable within-segment interactions learning). When exp_segment_size=1, each routed expert
     consumes individual token embeddings (standard MoE).
+
+    The segment structure lives in the router (contiguous patches commit to one expert -> temporally-coherent 
+    conditional computation) and in the dense shared path; the routed experts are position-wise specialists 
+    conditioned on a segment-level routing decision
     """
 
-    def __init__(self, d_model, d_ff, dropout=0.2, ffn_type='mlp', fan_gate=False, glu=False,
-                 n_experts=4, top_k=1, experts_type='mlp', exp_route_dropout=0.1, exp_route_temperature=1.0,
-                 bias=False, exp_segment_size=1) -> None:
+    def __init__(self, d_model, d_ff, dropout=0.2, ffn_type='mlp', fan_gate=False, glu=False, n_experts=4, 
+                 top_k=1, experts_type='mlp', exp_route_dropout=0.1, exp_route_temperature=1.0, bias=False, 
+                 exp_segment_size=1) -> None:
         super(MoESegment, self).__init__()
         assert n_experts >= 0, "n_experts must be non-negative"
         # store router probabilities for auxiliary load-balancing regularizers (losses)
@@ -516,10 +686,15 @@ class MoESegment(nn.Module):
             # controls contribution from fallback expert
             self.shared_gating= nn.Linear(d_model_seg, 1, bias=False) if self.shared_expert is not None else None
 
-            # n_experts routed expert modules -- if segment_size > 1, experts consume segments of
-            # size d_model * segment_size to allow experts to learn within-segment interactions,
-            # i.e., cross-token nonlinear combinations. This is not the same as applying a per-token
-            # expert independently to each token of the segment
+            # routing granularity and expert-computation granularity are deliberately decoupled. The segment
+            # structure is carried by (i) the gating above, which scores a whole segment (d_model_seg) so that
+            # segment_size contiguous patches commit to the same expert, and (ii) the shared expert 
+            # (d_model_seg -> d_ff_seg), which supplies the dense intra-segment nonlinearity, applied once.
+            #
+            # Self-attention is global over patches, so a token already carries content-based intra-segment context 
+            # before MoE sublayer. A concatenated expert would re-implement attention's mixing (a hard positional 
+            # prior that RoPE + attention already handle flexibly). Concatenating the segment inside the expert is
+            # costy and prone to overfitting.
             self.experts= nn.ModuleList([
                 nn.Sequential(
                     Rearrange('b (s c) -> b s c', s=self.segment_size) if self.segment_size > 1 else nn.Identity(),
@@ -572,8 +747,10 @@ class MoESegment(nn.Module):
         self.router_probs= self.router_dropout(F.softmax(router_logits.float() / self.router_temperature, dim=-1))
         # select top-k experts for each token (softmax scores and indices) -> (B * Segs, K)
         router, selected_experts= torch.topk(self.router_probs, self.top_k, dim=-1)
-        # renormalize over top-k so they sum to 1 -- keeps MoE as a convex mixture
-        router= router / router.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+        if self.top_k > 1:
+            # renormalize over top-k so they sum to 1 -- keeps the MoE a convex mixture.
+            router= router / router.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+        # else: keep raw gate prob so the router gets task-loss gradient
         # cast back to x dtype
         router= router.to(x.dtype)
 
