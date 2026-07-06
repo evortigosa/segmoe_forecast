@@ -1,14 +1,17 @@
 #!/bin/bash
-#SBATCH --job-name=weather_base
+#SBATCH --job-name=ecl_base
 #SBATCH -p segal.q
 #SBATCH --gres=gpu:L40S:1
 #SBATCH -c 3
-#SBATCH --mem=40G
-#SBATCH --time=6:00:00
+#SBATCH --mem=48G
+#SBATCH --time=12:00:00
+#SBATCH --propagate=NONE
 #SBATCH --output=/home/evandro/checkpoints_segmoe/logs/%x-%j.out
 #SBATCH --error=/home/evandro/checkpoints_segmoe/logs/%x-%j.err
 
 set -euo pipefail
+ulimit -v unlimited 2>/dev/null || true
+echo "vmem: soft=$(ulimit -Sv) hard=$(ulimit -Hv)"
 # ---------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------
@@ -45,12 +48,12 @@ print("====================\n")
 PY
 
 python -u -m segmoe_forecast.utils.run_benchmarks --model-size base \
-  --block-size 512 --patch-width 8 --width-factor 4 --channels 21 \
-  --set exp_route_dropout=0. --set exp_route_temperature=1.0 \
+  --block-size 512 --patch-width 8 --width-factor 4 --channels 321 \
+  --set exp_route_dropout=0.1 --set exp_route_temperature=1.0 \
   --exp-segment-size "[5,5,4,4,3,3]" \
-  --epochs 25 --max-lr 3.2e-4 --min-lr 1.2e-5 \
+  --epochs 15 --max-lr 2.6e-5 --min-lr 3.2e-6 \
   --weight-decay 1e-4 --warmup-portion 0.1 --setup-opt \
   --bf16 --moe-metrics --clip-grad None \
   --no-show-tqdm --save-plots --no-plot-cut-first \
-  --dataset-name "Weather" --no-from-csv --batch-size 192 \
-  --verbose --checkpoint-dir "$CHECKPOINT_ROOT" --seed 44
+  --dataset-name "ECL" --no-from-csv --batch-size 14 \
+  --verbose --checkpoint-dir "$CHECKPOINT_ROOT" --seed 62

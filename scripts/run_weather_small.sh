@@ -5,10 +5,13 @@
 #SBATCH -c 3
 #SBATCH --mem=28G
 #SBATCH --time=4:00:00
+#SBATCH --propagate=NONE
 #SBATCH --output=/home/evandro/checkpoints_segmoe/logs/%x-%j.out
 #SBATCH --error=/home/evandro/checkpoints_segmoe/logs/%x-%j.err
 
 set -euo pipefail
+ulimit -v unlimited 2>/dev/null || true
+echo "vmem: soft=$(ulimit -Sv) hard=$(ulimit -Hv)"
 # ---------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------
@@ -46,11 +49,11 @@ PY
 
 python -u -m segmoe_forecast.utils.run_benchmarks --model-size small \
   --block-size 512 --patch-width 8 --width-factor 4 --channels 21 \
-  --set exp_route_dropout=0. --set exp_route_temperature=1.0 \
+  --set exp_route_dropout=0.2 --set exp_route_temperature=1.0 \
   --exp-segment-size "[3,5,5,5]" \
   --epochs 20 --max-lr 3.2e-4 --min-lr 1.2e-5 \
   --weight-decay 1e-4 --warmup-portion 0.1 --setup-opt \
-  --bf16 --moe-metrics --clip-grad None \
+  --bf16 --moe-metrics --clip-grad 1.0 \
   --no-show-tqdm --save-plots --no-plot-cut-first \
   --dataset-name "Weather" --no-from-csv --batch-size 256 \
-  --verbose --checkpoint-dir "$CHECKPOINT_ROOT" --seed 44
+  --verbose --checkpoint-dir "$CHECKPOINT_ROOT" --seed 55
