@@ -120,9 +120,15 @@ def chunked_mse_mae(labels:torch.Tensor, preds:torch.Tensor, chunk_size:int=32):
 def get_metrics(trainer_obj, test_loader, dynamic_window=True, chunk_size=None):
     """
     Build metric objects from full predictions and ground-truth tensors.
+    In distributed mode:
+    - all ranks call trainer_obj.test(...);
+    - only the main rank receives/uses full preds and trues;
+    - non-main ranks return (None, None).
     """
     preds, trues= trainer_obj.test(test_loader, dynamic_window=dynamic_window)
 
+    if not trainer_obj._is_main_process():
+        return None, None
     if preds is None or trues is None:
         raise RuntimeError("Main process received None preds or labels from trainer.test().")
 
@@ -144,7 +150,11 @@ def get_metrics(trainer_obj, test_loader, dynamic_window=True, chunk_size=None):
 def eval_forecast_horizons(trainer_obj, data_name, test_loader_96=None, test_loader_192=None,
                            test_loader_336=None, test_loader_720=None, dynamic_window=True):
     """
-    Evaluate multiple forecast horizons and return (avg_mse, avg_mae), i.e., {96, 192, 336, 720}.
+    Evaluate multiple forecast horizons and return (avg_mse, avg_mae), i.e., {96, 192, 336, 720}
+    In distributed mode:
+    - all ranks execute the same horizon sequence;
+    - all ranks call test(), because test() uses distributed collectives;
+    - only the main rank prints and accumulates final metric values.
     """
     avg_mse= []
     avg_mae= []
@@ -153,21 +163,26 @@ def eval_forecast_horizons(trainer_obj, data_name, test_loader_96=None, test_loa
         if loader is None:
             return
         # must happen on all ranks
-        print(f"\nForecast horizon: {horizon}")
+        trainer_obj._print(f"\nForecast horizon: {horizon}")
         trainer_obj.set_forecast_horizon(horizon)
         mse_metric, mae_metric= get_metrics(trainer_obj, loader, dynamic_window, chunk_size)
 
-        avg_mse.append(mse_metric.value)
-        avg_mae.append(mae_metric.value)
-        print(mse_metric)
-        print(mae_metric)
+        if trainer_obj._is_main_process():
+            avg_mse.append(mse_metric.value)
+            avg_mae.append(mae_metric.value)
+            print(mse_metric)
+            print(mae_metric)
 
-    print(f"\n{data_name}")
+        trainer_obj._barrier()
+
+    trainer_obj._print(f"\n{data_name}")
     eval_one_horizon( 96, test_loader_96)
     eval_one_horizon(192, test_loader_192)
     eval_one_horizon(336, test_loader_336)
     eval_one_horizon(720, test_loader_720, chunk_size=32)
 
+    if not trainer_obj._is_main_process():
+        return None, None
     if len(avg_mse) == 0:
         return float("nan"), float("nan")
 
